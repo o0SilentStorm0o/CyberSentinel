@@ -1,0 +1,14 @@
+<resources>
+    <!-- Splash screen theme -->
+    <style name="Theme.CyberSentinel.Splash" parent="Theme.SplashScreen">
+        <item name="windowSplashScreenBackground">@color/splash_background</item>
+        <item name="windowSplashScreenAnimatedIcon">@drawable/ic_launcher_foreground</item>
+        <item name="postSplashScreenTheme">@style/Theme.CyberSentinel</item>
+    </style>
+
+    <!-- Main app theme -->
+    <style name="Theme.CyberSentinel" parent="Theme.Material3.DayNight.NoActionBar">
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+    </style>
+</resources>
