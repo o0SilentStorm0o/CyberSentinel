@@ -127,4 +127,48 @@ class CveRepository @Inject constructor(
     suspend fun isAcknowledged(id: String) = cveDao.isAcknowledged(id)
     
     fun getDeviceProfile(): DeviceProfile = profileProvider.get()
+    
+    /**
+     * Search CVEs for a specific product (for App CVE Scanner).
+     * Used for high-confidence app → CVE matching (browsers, etc.)
+     * 
+     * @param vendor CPE vendor (e.g., "google", "mozilla")
+     * @param product CPE product (e.g., "chrome", "firefox")
+     * @param version Major version to match (optional)
+     * @return List of matching CVEs
+     */
+    suspend fun searchCvesForProduct(
+        vendor: String,
+        product: String,
+        version: String? = null
+    ): List<CveItem> {
+        val end = ZonedDateTime.now(ZoneOffset.UTC)
+        val start = end.minusDays(90) // Last 90 days for app CVEs
+        
+        val fmt = DateTimeFormatter.ISO_INSTANT
+        val pubStart = fmt.format(start)
+        val pubEnd = fmt.format(end)
+        
+        // Build CPE string: cpe:2.3:a:vendor:product:*
+        val cpe = if (version != null) {
+            "cpe:2.3:a:$vendor:$product:$version*"
+        } else {
+            "cpe:2.3:a:$vendor:$product:*"
+        }
+        
+        return try {
+            val resp = nvdApi.search(
+                start = pubStart,
+                end = pubEnd,
+                startIndex = 0,
+                rpp = 20, // Limit results for app scanning
+                vms = cpe,
+                apiKey = null
+            )
+            nvdToDomain(resp)
+        } catch (e: Exception) {
+            // Return empty list on error - don't break the scan
+            emptyList()
+        }
+    }
 }

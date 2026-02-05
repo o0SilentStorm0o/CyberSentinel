@@ -41,6 +41,7 @@ class AppSecurityScanner @Inject constructor(
         val permissionAnalysis: PermissionAnalysis,
         val componentAnalysis: ComponentAnalysis,
         val nativeLibAnalysis: NativeLibAnalysis,
+        val trustVerification: TrustedAppsWhitelist.TrustVerification,
         val overallRisk: RiskLevel,
         val issues: List<AppSecurityIssue>
     )
@@ -341,26 +342,55 @@ class AppSecurityScanner @Inject constructor(
         
         val issues = mutableListOf<AppSecurityIssue>()
         
-        // Check if app is from a trusted developer (Google, Meta, Microsoft, etc.)
-        val isTrustedApp = TrustedAppsWhitelist.isTrustedApp(packageInfo.packageName)
+        // CRITICAL: Verify trust using BOTH packageName AND certificate SHA-256
+        // This prevents bypass via re-signed APKs (packageName alone is NOT secure!)
+        val certFingerprint = signatureAnalysis.sha256Fingerprint
+        val trustVerification = TrustedAppsWhitelist.verifyTrustedApp(
+            packageInfo.packageName, 
+            certFingerprint
+        )
         
-        // Collect issues from all analyses
-        // For trusted apps, skip certain false-positive findings
-        issues.addAll(signatureAnalysis.issues.mapIndexed { i, issue ->
-            AppSecurityIssue(
-                id = "sig_${packageInfo.packageName}_$i",
-                title = "Může jít o neoficiální verzi", // User-friendly title
-                description = "${scannedApp.appName} je podepsána vývojářským certifikátem, což znamená, že nepochází z oficiálního obchodu.",
-                impact = "Upravené aplikace mohou obsahovat škodlivý kód. Doporučujeme stáhnout aplikaci z Google Play.",
+        // Flag apps that LOOK like trusted apps but have wrong certificate (possible re-sign!)
+        if (trustVerification.reason == TrustedAppsWhitelist.TrustReason.UNKNOWN_CERT) {
+            issues.add(AppSecurityIssue(
+                id = "sig_resigned_${packageInfo.packageName}",
+                title = "Může jít o neoficiální verzi",
+                description = "${scannedApp.appName} tvrdí, že pochází od známého vývojáře, " +
+                        "ale její podpis neodpovídá oficiální verzi.",
+                impact = "Tato aplikace mohla být upravena třetí stranou. " +
+                        "Doporučujeme stáhnout aplikaci přímo z Google Play.",
                 category = IssueCategory.SIGNATURE,
-                severity = if (signatureAnalysis.isDebugSigned) RiskLevel.HIGH else RiskLevel.MEDIUM,
-                action = IssueAction.OpenPlayStore(packageInfo.packageName, "Přeinstalovat z Play Store")
-            )
-        })
+                severity = RiskLevel.HIGH,
+                action = IssueAction.OpenPlayStore(packageInfo.packageName, "Přeinstalovat z Play Store"),
+                technicalDetails = "Očekávaný podpis neodpovídá. Cert: ${certFingerprint.take(16)}..."
+            ))
+        }
         
-        // Permission issues - skip for trusted apps (they legitimately need many permissions)
+        // Collect issues from signature analysis (debug cert, etc.)
+        // For trusted apps with verified cert, skip debug signature warning
+        if (!trustVerification.isTrusted) {
+            issues.addAll(signatureAnalysis.issues.mapIndexed { i, issue ->
+                AppSecurityIssue(
+                    id = "sig_${packageInfo.packageName}_$i",
+                    title = "Může jít o neoficiální verzi",
+                    description = "${scannedApp.appName} je podepsána vývojářským certifikátem, " +
+                            "což znamená, že nepochází z oficiálního obchodu.",
+                    impact = "Upravené aplikace mohou obsahovat škodlivý kód. " +
+                            "Doporučujeme stáhnout aplikaci z Google Play.",
+                    category = IssueCategory.SIGNATURE,
+                    severity = if (signatureAnalysis.isDebugSigned) RiskLevel.HIGH else RiskLevel.MEDIUM,
+                    action = IssueAction.OpenPlayStore(packageInfo.packageName, "Přeinstalovat z Play Store")
+                )
+            })
+        }
+        
+        // Permission issues - skip for trusted apps with verified cert
         if (permissionAnalysis.isOverPrivileged && 
-            !TrustedAppsWhitelist.shouldDowngradeFinding(packageInfo.packageName, TrustedAppsWhitelist.FindingType.OVER_PRIVILEGED)) {
+            !TrustedAppsWhitelist.shouldDowngradeFinding(
+                packageInfo.packageName, 
+                certFingerprint,
+                TrustedAppsWhitelist.FindingType.OVER_PRIVILEGED
+            )) {
             issues.add(AppSecurityIssue(
                 id = "perm_overprivileged_${packageInfo.packageName}",
                 title = "Nadměrná oprávnění",
@@ -396,9 +426,13 @@ class AppSecurityScanner @Inject constructor(
                 ))
             }
         
-        // Exported components without protection - skip for trusted apps
+        // Exported components without protection - skip for trusted apps with verified cert
         if (componentAnalysis.hasExportedRisks && 
-            !TrustedAppsWhitelist.shouldDowngradeFinding(packageInfo.packageName, TrustedAppsWhitelist.FindingType.EXPORTED_COMPONENTS)) {
+            !TrustedAppsWhitelist.shouldDowngradeFinding(
+                packageInfo.packageName, 
+                certFingerprint,
+                TrustedAppsWhitelist.FindingType.EXPORTED_COMPONENTS
+            )) {
             val unprotectedCount = componentAnalysis.exportedActivities.count { !it.isProtected } +
                     componentAnalysis.exportedServices.count { !it.isProtected } +
                     componentAnalysis.exportedReceivers.count { !it.isProtected }
@@ -409,14 +443,18 @@ class AppSecurityScanner @Inject constructor(
                 description = "${scannedApp.appName} má $unprotectedCount nechráněných vstupních bodů.",
                 impact = "Jiné aplikace ve vašem telefonu mohou spouštět části této aplikace bez vašeho vědomí.",
                 category = IssueCategory.COMPONENTS,
-                severity = RiskLevel.LOW, // Downgraded - usually not critical for regular users
+                severity = RiskLevel.LOW,
                 action = IssueAction.OpenPlayStore(packageInfo.packageName, "Zkontrolovat aktualizaci")
             ))
         }
         
-        // Suspicious native libraries - skip for trusted apps (they may legitimately use these)
+        // Suspicious native libraries - skip for trusted apps with verified cert
         if (nativeLibAnalysis.hasSuspiciousLibs && 
-            !TrustedAppsWhitelist.shouldDowngradeFinding(packageInfo.packageName, TrustedAppsWhitelist.FindingType.SUSPICIOUS_NATIVE_LIB)) {
+            !TrustedAppsWhitelist.shouldDowngradeFinding(
+                packageInfo.packageName, 
+                certFingerprint,
+                TrustedAppsWhitelist.FindingType.SUSPICIOUS_NATIVE_LIB
+            )) {
             val suspiciousLibs = nativeLibAnalysis.libraries.filter { it.isSuspicious }
             issues.add(AppSecurityIssue(
                 id = "native_suspicious_${packageInfo.packageName}",
@@ -464,6 +502,7 @@ class AppSecurityScanner @Inject constructor(
             permissionAnalysis = permissionAnalysis,
             componentAnalysis = componentAnalysis,
             nativeLibAnalysis = nativeLibAnalysis,
+            trustVerification = trustVerification,
             overallRisk = overallRisk,
             issues = issues
         )

@@ -25,7 +25,6 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.cybersentinel.app.domain.security.AppSecurityScanner.*
 import com.cybersentinel.app.domain.security.RiskLabels
-import com.cybersentinel.app.domain.security.TrustedAppsWhitelist
 import com.cybersentinel.app.domain.security.resolveAction
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -427,7 +426,10 @@ private fun AppReportCard(
     // Use human-readable risk labels
     val riskLabel = RiskLabels.getLabel(report.overallRisk)
     val riskColor = Color(riskLabel.color)
-    val isTrusted = TrustedAppsWhitelist.isTrustedApp(report.app.packageName)
+    
+    // Use secure trust verification (packageName + SHA-256 cert)
+    val isTrusted = report.trustVerification.isTrusted
+    val developerName = report.trustVerification.developerName
     
     Card(
         onClick = { expanded = !expanded },
@@ -468,7 +470,7 @@ private fun AppReportCard(
                             Spacer(Modifier.width(6.dp))
                             Icon(
                                 imageVector = Icons.Default.Verified,
-                                contentDescription = "Důvěryhodný vývojář",
+                                contentDescription = developerName?.let { "Ověřeno: $it" } ?: "Ověřený vývojář",
                                 tint = Color(0xFF2196F3),
                                 modifier = Modifier.size(16.dp)
                             )
