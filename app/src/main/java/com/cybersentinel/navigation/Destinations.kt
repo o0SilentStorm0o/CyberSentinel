@@ -1,6 +1,7 @@
 package com.cybersentinel.navigation
 
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Apps
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.QrCodeScanner
@@ -27,6 +28,12 @@ sealed class Screen(
         route = "home",
         title = "CVE",
         icon = Icons.Default.Security
+    )
+    
+    object AppScan : Screen(
+        route = "app_scan",
+        title = "Aplikace",
+        icon = Icons.Default.Apps
     )
     
     object QrScanner : Screen(
@@ -59,8 +66,8 @@ sealed class Screen(
  */
 val bottomNavScreens = listOf(
     Screen.Dashboard,
+    Screen.AppScan,
     Screen.QrScanner,
     Screen.WifiAuditor,
-    Screen.PasswordCheck,
     Screen.Settings
 )

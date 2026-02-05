@@ -12,6 +12,7 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
+import com.cybersentinel.app.ui.screens.appscan.AppScanScreen
 import com.cybersentinel.app.ui.screens.dashboard.DashboardScreen
 import com.cybersentinel.ui.screens.home.HomeScreen
 import com.cybersentinel.ui.screens.qr.QrScannerScreen
@@ -41,6 +42,12 @@ fun CyberSentinelNavigation(
         ) {
             composable(Screen.Dashboard.route) {
                 DashboardScreen()
+            }
+            
+            composable(Screen.AppScan.route) {
+                AppScanScreen(
+                    onNavigateBack = { navController.popBackStack() }
+                )
             }
             
             composable(Screen.Home.route) {
