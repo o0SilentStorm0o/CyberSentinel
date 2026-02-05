@@ -98,7 +98,9 @@ fun AppScanScreen(
             if (uiState.isScanning) {
                 // Show placeholder during scan
                 Box(
-                    modifier = Modifier.fillMaxSize(),
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .weight(1f),
                     contentAlignment = Alignment.Center
                 ) {
                     CircularProgressIndicator()
@@ -107,6 +109,9 @@ fun AppScanScreen(
                 EmptyState(onStartScan = { viewModel.startScan() })
             } else {
                 LazyColumn(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f),
                     contentPadding = PaddingValues(16.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
