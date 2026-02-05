@@ -67,22 +67,17 @@ fun AppScanScreen(
                 .fillMaxSize()
                 .padding(padding)
         ) {
-            // Scanning progress or summary
-            AnimatedContent(
-                targetState = uiState.isScanning,
-                transitionSpec = {
-                    fadeIn() + slideInVertically() togetherWith fadeOut() + slideOutVertically()
-                },
-                label = "scan_state"
-            ) { isScanning ->
-                if (isScanning) {
-                    ScanningProgress(
-                        progress = uiState.scanProgress,
-                        currentApp = uiState.currentScanningApp
-                    )
-                } else if (uiState.summary != null) {
-                    ScanSummaryCard(summary = uiState.summary!!)
-                }
+            // Summary card (always visible when scan complete)
+            if (!uiState.isScanning && uiState.summary != null) {
+                ScanSummaryCard(summary = uiState.summary!!)
+            }
+            
+            // Scanning progress
+            if (uiState.isScanning) {
+                ScanningProgress(
+                    progress = uiState.scanProgress,
+                    currentApp = uiState.currentScanningApp
+                )
             }
             
             // Filter chips
@@ -94,27 +89,24 @@ fun AppScanScreen(
                 )
             }
             
-            // Results list
-            if (uiState.isScanning) {
-                // Show placeholder during scan
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .weight(1f),
-                    contentAlignment = Alignment.Center
-                ) {
-                    CircularProgressIndicator()
+            // Results list - takes remaining space
+            when {
+                uiState.isScanning -> {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        CircularProgressIndicator()
+                    }
                 }
-            } else if (uiState.reports.isEmpty()) {
-                EmptyState(onStartScan = { viewModel.startScan() })
-            } else {
-                LazyColumn(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .weight(1f),
-                    contentPadding = PaddingValues(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
+                uiState.reports.isEmpty() -> {
+                    Box(modifier = Modifier.weight(1f)) {
+                        EmptyState(onStartScan = { viewModel.startScan() })
+                    }
+                }
+                else -> {
                     val filteredReports = when (uiState.filter) {
                         AppFilter.ALL -> uiState.reports
                         AppFilter.CRITICAL -> uiState.reports.filter { it.overallRisk == RiskLevel.CRITICAL }
@@ -128,18 +120,26 @@ fun AppScanScreen(
                         }
                     }
                     
-                    items(
-                        items = filteredReports,
-                        key = { it.app.packageName }
-                    ) { report ->
-                        AppReportCard(
-                            report = report,
-                            onClick = { onNavigateToAppDetail(report.app.packageName) }
-                        )
-                    }
-                    
-                    item {
-                        Spacer(Modifier.height(80.dp))
+                    LazyColumn(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f),
+                        contentPadding = PaddingValues(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        items(
+                            items = filteredReports,
+                            key = { it.app.packageName }
+                        ) { report ->
+                            AppReportCard(
+                                report = report,
+                                onClick = { onNavigateToAppDetail(report.app.packageName) }
+                            )
+                        }
+                        
+                        item {
+                            Spacer(Modifier.height(80.dp))
+                        }
                     }
                 }
             }
