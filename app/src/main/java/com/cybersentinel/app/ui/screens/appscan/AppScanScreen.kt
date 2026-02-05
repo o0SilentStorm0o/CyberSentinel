@@ -26,7 +26,10 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.cybersentinel.app.domain.security.AppSecurityScanner.*
+import com.cybersentinel.app.domain.security.BaselineManager
 import com.cybersentinel.app.domain.security.RiskLabels
+import com.cybersentinel.app.domain.security.TrustEvidenceEngine
+import com.cybersentinel.app.domain.security.TrustRiskModel
 
 private const val TAG = "AppScanScreen"
 
@@ -464,6 +467,13 @@ private fun AppReportCard(
     // Use secure trust verification (packageName + SHA-256 cert)
     val isTrusted = report.trustVerification.isTrusted
     val developerName = report.trustVerification.developerName
+    val trustLevel = report.trustEvidence.trustLevel
+    val trustBadge = when (trustLevel) {
+        TrustEvidenceEngine.TrustLevel.HIGH -> "✅"
+        TrustEvidenceEngine.TrustLevel.MODERATE -> "🟡"
+        TrustEvidenceEngine.TrustLevel.LOW -> "⚠️"
+        TrustEvidenceEngine.TrustLevel.ANOMALOUS -> "🚨"
+    }
     
     Card(
         modifier = Modifier
@@ -510,6 +520,13 @@ private fun AppReportCard(
                     color = riskColor
                 )
                 
+                // Trust badge
+                Text(
+                    text = trustBadge,
+                    style = MaterialTheme.typography.labelSmall,
+                    modifier = Modifier.padding(start = 4.dp)
+                )
+                
                 // Expand icon
                 Icon(
                     imageVector = if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
@@ -521,11 +538,15 @@ private fun AppReportCard(
             
             // Main concern (one-liner under the name)
             val mainConcern = when {
+                report.baselineComparison.anomalies.any { 
+                    it.type == BaselineManager.AnomalyType.CERT_CHANGED 
+                } -> "⚠️ Změna podpisu od posledního skenování!"
                 report.signatureAnalysis.isDebugSigned -> "Může jít o neoficiální verzi"
                 report.nativeLibAnalysis.hasSuspiciousLibs -> "Obsahuje neobvyklý kód"
                 report.permissionAnalysis.isOverPrivileged -> "Má více oprávnění než potřebuje"
                 report.app.targetSdk in 1..28 -> "Navržena pro starší Android"
                 report.issues.isNotEmpty() -> riskLabel.shortDescription
+                isTrusted && developerName != null -> "Ověřeno: $developerName"
                 else -> null
             }
             
@@ -613,6 +634,39 @@ private fun AppReportCard(
                             )
                         }
                     }
+                }
+                
+                // Trust & Verdict info
+                Spacer(Modifier.height(8.dp))
+                val verdictLabel = when (report.verdict.effectiveRisk) {
+                    TrustRiskModel.EffectiveRisk.CRITICAL -> "🔴 Kritické riziko"
+                    TrustRiskModel.EffectiveRisk.ELEVATED -> "🟠 Zvýšené riziko"
+                    TrustRiskModel.EffectiveRisk.LOW -> "🟡 Nízké riziko"
+                    TrustRiskModel.EffectiveRisk.NOMINAL -> "🟢 Nominální"
+                }
+                val trustLabel = when (trustLevel) {
+                    TrustEvidenceEngine.TrustLevel.HIGH -> "Vysoká důvěra"
+                    TrustEvidenceEngine.TrustLevel.MODERATE -> "Střední důvěra"
+                    TrustEvidenceEngine.TrustLevel.LOW -> "Nízká důvěra"
+                    TrustEvidenceEngine.TrustLevel.ANOMALOUS -> "Podezřelé"
+                }
+                val installerLabel = when (report.trustEvidence.installerInfo.installerType) {
+                    TrustEvidenceEngine.InstallerType.PLAY_STORE -> "Google Play"
+                    TrustEvidenceEngine.InstallerType.SAMSUNG_STORE -> "Galaxy Store"
+                    TrustEvidenceEngine.InstallerType.HUAWEI_APPGALLERY -> "AppGallery"
+                    TrustEvidenceEngine.InstallerType.AMAZON_APPSTORE -> "Amazon"
+                    TrustEvidenceEngine.InstallerType.SYSTEM_INSTALLER -> "Předinstalováno"
+                    TrustEvidenceEngine.InstallerType.MDM_INSTALLER -> "MDM"
+                    TrustEvidenceEngine.InstallerType.SIDELOADED -> "Sideload"
+                    TrustEvidenceEngine.InstallerType.UNKNOWN -> "Neznámý"
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(verdictLabel, style = MaterialTheme.typography.labelSmall)
+                    Text("$trustBadge $trustLabel", style = MaterialTheme.typography.labelSmall)
+                    Text("📦 $installerLabel", style = MaterialTheme.typography.labelSmall)
                 }
                 
                 // Tech details row

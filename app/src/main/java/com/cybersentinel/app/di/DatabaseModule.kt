@@ -3,6 +3,7 @@ package com.cybersentinel.app.di
 
 import android.content.Context
 import androidx.room.Room
+import com.cybersentinel.app.data.local.AppBaselineDao
 import com.cybersentinel.app.data.local.AppDatabase
 import com.cybersentinel.app.data.local.FavoriteDao
 import com.cybersentinel.app.data.local.CveDao
@@ -21,7 +22,8 @@ object DatabaseModule {
     @Provides @Singleton
     fun db(@ApplicationContext ctx: Context): AppDatabase =
         Room.databaseBuilder(ctx, AppDatabase::class.java, "cybersentinel.db")
-            .fallbackToDestructiveMigration() // for v1->v2 migration
+            .addMigrations(AppDatabase.MIGRATION_2_3)
+            .fallbackToDestructiveMigration() // fallback for older migrations
             .build()
 
 
@@ -33,4 +35,7 @@ object DatabaseModule {
     
     @Provides 
     fun kevDao(db: AppDatabase): KevDao = db.kevDao()
+    
+    @Provides
+    fun appBaselineDao(db: AppDatabase): AppBaselineDao = db.appBaselineDao()
 }

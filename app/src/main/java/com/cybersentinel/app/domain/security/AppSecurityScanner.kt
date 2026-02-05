@@ -26,10 +26,16 @@ import javax.inject.Singleton
  * 3. Native Library Scanning - detects suspicious .so files
  * 4. Intent Filter Analysis - finds exported components risks
  * 5. Real-time CVE matching via CPE
+ * 6. Trust Evidence Engine - multi-factor identity verification
+ * 7. Baseline Manager - change detection across scans
+ * 8. Trust & Risk Model - combined severity with hard/soft finding classification
  */
 @Singleton
 class AppSecurityScanner @Inject constructor(
-    @ApplicationContext private val context: Context
+    @ApplicationContext private val context: Context,
+    private val trustEngine: TrustEvidenceEngine,
+    private val trustRiskModel: TrustRiskModel,
+    private val baselineManager: BaselineManager
 ) {
     
     /**
@@ -42,6 +48,9 @@ class AppSecurityScanner @Inject constructor(
         val componentAnalysis: ComponentAnalysis,
         val nativeLibAnalysis: NativeLibAnalysis,
         val trustVerification: TrustedAppsWhitelist.TrustVerification,
+        val trustEvidence: TrustEvidenceEngine.TrustEvidence,
+        val verdict: TrustRiskModel.AppVerdict,
+        val baselineComparison: BaselineManager.BaselineComparison,
         val overallRisk: RiskLevel,
         val issues: List<AppSecurityIssue>
     )
@@ -291,7 +300,6 @@ class AppSecurityScanner @Inject constructor(
      * Perform comprehensive security scan on all installed apps
      */
     suspend fun scanAllApps(includeSystem: Boolean = false): List<AppSecurityReport> {
-        val pm = context.packageManager
         val packages = getInstalledPackages()
         
         return packages
@@ -307,10 +315,10 @@ class AppSecurityScanner @Inject constructor(
     }
     
     /**
-     * Analyze a single app
+     * Analyze a single app with full trust evidence + baseline comparison
      */
     @SuppressLint("PackageManagerGetSignatures")
-    fun analyzeApp(packageInfo: PackageInfo): AppSecurityReport {
+    suspend fun analyzeApp(packageInfo: PackageInfo): AppSecurityReport {
         val pm = context.packageManager
         val appInfo = packageInfo.applicationInfo
         
@@ -341,74 +349,133 @@ class AppSecurityScanner @Inject constructor(
         val nativeLibAnalysis = analyzeNativeLibs(appInfo?.sourceDir, appInfo?.nativeLibraryDir)
         
         val issues = mutableListOf<AppSecurityIssue>()
+        val rawFindings = mutableListOf<TrustRiskModel.RawFinding>()
         
-        // CRITICAL: Verify trust using BOTH packageName AND certificate SHA-256
-        // This prevents bypass via re-signed APKs (packageName alone is NOT secure!)
+        // ── 1. Collect trust evidence (multi-factor) ──
         val certFingerprint = signatureAnalysis.sha256Fingerprint
         val trustVerification = TrustedAppsWhitelist.verifyTrustedApp(
-            packageInfo.packageName, 
-            certFingerprint
+            packageInfo.packageName, certFingerprint
+        )
+        val trustEvidence = trustEngine.collectEvidence(packageInfo, certFingerprint)
+        
+        // ── 2. Baseline comparison (change detection) ──
+        val installerPkg = trustEvidence.installerInfo.installerPackage
+        val baselineComparison = baselineManager.compareWithBaseline(
+            packageName = packageInfo.packageName,
+            currentCertSha256 = certFingerprint,
+            currentVersionCode = scannedApp.versionCode,
+            currentVersionName = scannedApp.versionName,
+            isSystemApp = scannedApp.isSystemApp,
+            installerPackage = installerPkg,
+            apkPath = scannedApp.apkPath
         )
         
-        // Flag apps that LOOK like trusted apps but have wrong certificate (possible re-sign!)
+        // ── 3. Generate issues + raw findings ──
+        
+        // Baseline anomalies → HARD findings
+        baselineComparison.anomalies.forEach { anomaly ->
+            val (findingType, severity) = when (anomaly.type) {
+                BaselineManager.AnomalyType.CERT_CHANGED -> 
+                    TrustRiskModel.FindingType.BASELINE_SIGNATURE_CHANGE to RiskLevel.CRITICAL
+                BaselineManager.AnomalyType.NEW_SYSTEM_APP -> 
+                    TrustRiskModel.FindingType.BASELINE_NEW_SYSTEM_APP to RiskLevel.HIGH
+                BaselineManager.AnomalyType.INSTALLER_CHANGED -> 
+                    TrustRiskModel.FindingType.INSTALLER_ANOMALY to RiskLevel.MEDIUM
+                BaselineManager.AnomalyType.VERSION_CHANGED -> 
+                    TrustRiskModel.FindingType.OLD_TARGET_SDK to RiskLevel.LOW // Not really a finding
+                BaselineManager.AnomalyType.PARTITION_CHANGED -> 
+                    TrustRiskModel.FindingType.INSTALLER_ANOMALY to RiskLevel.MEDIUM
+            }
+            
+            // Only create issues for significant anomalies
+            if (anomaly.severity != BaselineManager.AnomalySeverity.LOW) {
+                issues.add(AppSecurityIssue(
+                    id = "baseline_${anomaly.type.name.lowercase()}_${packageInfo.packageName}",
+                    title = anomaly.description,
+                    description = anomaly.details ?: anomaly.description,
+                    impact = when (anomaly.type) {
+                        BaselineManager.AnomalyType.CERT_CHANGED -> 
+                            "Změna podpisu může znamenat přebalení aplikace třetí stranou."
+                        BaselineManager.AnomalyType.NEW_SYSTEM_APP -> 
+                            "Nová systémová komponenta může indikovat neautorizovanou modifikaci."
+                        else -> "Doporučujeme zkontrolovat."
+                    },
+                    category = IssueCategory.SIGNATURE,
+                    severity = severity,
+                    action = IssueAction.OpenPlayStore(packageInfo.packageName, "Zkontrolovat")
+                ))
+                rawFindings.add(TrustRiskModel.RawFinding(findingType, severity, anomaly.description, anomaly.details ?: ""))
+            }
+        }
+        
+        // Cert mismatch (HARD)
         if (trustVerification.reason == TrustedAppsWhitelist.TrustReason.UNKNOWN_CERT) {
+            val title = "Může jít o neoficiální verzi"
             issues.add(AppSecurityIssue(
                 id = "sig_resigned_${packageInfo.packageName}",
-                title = "Může jít o neoficiální verzi",
-                description = "${scannedApp.appName} tvrdí, že pochází od známého vývojáře, " +
-                        "ale její podpis neodpovídá oficiální verzi.",
-                impact = "Tato aplikace mohla být upravena třetí stranou. " +
-                        "Doporučujeme stáhnout aplikaci přímo z Google Play.",
+                title = title,
+                description = "${scannedApp.appName} tvrdí, že pochází od známého vývojáře, ale její podpis neodpovídá.",
+                impact = "Tato aplikace mohla být upravena třetí stranou.",
                 category = IssueCategory.SIGNATURE,
                 severity = RiskLevel.HIGH,
                 action = IssueAction.OpenPlayStore(packageInfo.packageName, "Přeinstalovat z Play Store"),
-                technicalDetails = "Očekávaný podpis neodpovídá. Cert: ${certFingerprint.take(16)}..."
+                technicalDetails = "Cert: ${certFingerprint.take(16)}..."
+            ))
+            rawFindings.add(TrustRiskModel.RawFinding(
+                TrustRiskModel.FindingType.SIGNATURE_MISMATCH, RiskLevel.HIGH, title, ""
             ))
         }
         
-        // Collect issues from signature analysis (debug cert, etc.)
-        // For trusted apps with verified cert, skip debug signature warning
-        if (!trustVerification.isTrusted) {
-            issues.addAll(signatureAnalysis.issues.mapIndexed { i, issue ->
+        // Debug signature (HARD — trust NEVER suppresses)
+        if (signatureAnalysis.isDebugSigned) {
+            val title = "Vývojová verze aplikace"
+            issues.add(AppSecurityIssue(
+                id = "sig_debug_${packageInfo.packageName}",
+                title = title,
+                description = "${scannedApp.appName} je podepsána vývojářským certifikátem.",
+                impact = "Nepochází z oficiálního obchodu. Doporučujeme stáhnout z Google Play.",
+                category = IssueCategory.SIGNATURE,
+                severity = RiskLevel.HIGH,
+                action = IssueAction.OpenPlayStore(packageInfo.packageName, "Přeinstalovat z Play Store")
+            ))
+            rawFindings.add(TrustRiskModel.RawFinding(
+                TrustRiskModel.FindingType.DEBUG_SIGNATURE, RiskLevel.HIGH, title, ""
+            ))
+        } else if (signatureAnalysis.issues.isNotEmpty() && !trustVerification.isTrusted) {
+            // Other signature issues for non-trusted apps
+            issues.addAll(signatureAnalysis.issues.mapIndexed { i, _ ->
                 AppSecurityIssue(
                     id = "sig_${packageInfo.packageName}_$i",
-                    title = "Může jít o neoficiální verzi",
-                    description = "${scannedApp.appName} je podepsána vývojářským certifikátem, " +
-                            "což znamená, že nepochází z oficiálního obchodu.",
-                    impact = "Upravené aplikace mohou obsahovat škodlivý kód. " +
-                            "Doporučujeme stáhnout aplikaci z Google Play.",
+                    title = "Neobvyklý podpis",
+                    description = "${scannedApp.appName} má neobvyklý podpisový certifikát.",
+                    impact = "Doporučujeme zkontrolovat původ aplikace.",
                     category = IssueCategory.SIGNATURE,
-                    severity = if (signatureAnalysis.isDebugSigned) RiskLevel.HIGH else RiskLevel.MEDIUM,
-                    action = IssueAction.OpenPlayStore(packageInfo.packageName, "Přeinstalovat z Play Store")
+                    severity = RiskLevel.MEDIUM,
+                    action = IssueAction.OpenPlayStore(packageInfo.packageName, "Zkontrolovat aktualizaci")
                 )
             })
         }
         
-        // Permission issues - skip for trusted apps with verified cert
-        if (permissionAnalysis.isOverPrivileged && 
-            !TrustedAppsWhitelist.shouldDowngradeFinding(
-                packageInfo.packageName, 
-                certFingerprint,
-                TrustedAppsWhitelist.FindingType.OVER_PRIVILEGED
-            )) {
+        // Over-privileged (SOFT)
+        if (permissionAnalysis.isOverPrivileged) {
+            val title = "Nadměrná oprávnění"
             issues.add(AppSecurityIssue(
                 id = "perm_overprivileged_${packageInfo.packageName}",
-                title = "Nadměrná oprávnění",
+                title = title,
                 description = "${scannedApp.appName} má více oprávnění, než byste od aplikace tohoto typu očekávali.",
-                impact = "Aplikace může sbírat data, která ke své funkci nepotřebuje. Vaše soukromí může být ohroženo.",
+                impact = "Aplikace může sbírat data, která ke své funkci nepotřebuje.",
                 category = IssueCategory.PERMISSIONS,
                 severity = RiskLevel.MEDIUM,
-                action = IssueAction.OpenSettings(
-                    Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-                    "Zkontrolovat oprávnění"
-                ),
+                action = IssueAction.OpenSettings(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, "Zkontrolovat oprávnění"),
                 technicalDetails = "Kritická oprávnění: ${permissionAnalysis.dangerousPermissions
-                    .filter { it.isGranted }
-                    .joinToString { it.shortName }}"
+                    .filter { it.isGranted }.joinToString { it.shortName }}"
+            ))
+            rawFindings.add(TrustRiskModel.RawFinding(
+                TrustRiskModel.FindingType.OVER_PRIVILEGED, RiskLevel.MEDIUM, title, ""
             ))
         }
         
-        // Critical permissions granted
+        // Critical permissions (SOFT)
         permissionAnalysis.dangerousPermissions
             .filter { it.isGranted && it.riskLevel == RiskLevel.CRITICAL }
             .forEach { perm ->
@@ -419,82 +486,124 @@ class AppSecurityScanner @Inject constructor(
                     impact = perm.description,
                     category = IssueCategory.PERMISSIONS,
                     severity = RiskLevel.HIGH,
-                    action = IssueAction.OpenSettings(
-                        Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-                        "Odebrat oprávnění"
-                    )
+                    action = IssueAction.OpenSettings(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, "Odebrat oprávnění")
+                ))
+                rawFindings.add(TrustRiskModel.RawFinding(
+                    TrustRiskModel.FindingType.CRITICAL_PERMISSION, RiskLevel.HIGH, perm.shortName, perm.description
                 ))
             }
         
-        // Exported components without protection - skip for trusted apps with verified cert
-        if (componentAnalysis.hasExportedRisks && 
-            !TrustedAppsWhitelist.shouldDowngradeFinding(
-                packageInfo.packageName, 
-                certFingerprint,
-                TrustedAppsWhitelist.FindingType.EXPORTED_COMPONENTS
-            )) {
+        // Exported components (SOFT)
+        if (componentAnalysis.hasExportedRisks) {
             val unprotectedCount = componentAnalysis.exportedActivities.count { !it.isProtected } +
                     componentAnalysis.exportedServices.count { !it.isProtected } +
                     componentAnalysis.exportedReceivers.count { !it.isProtected }
-            
+            val title = "Může být ovládána jinými aplikacemi"
             issues.add(AppSecurityIssue(
                 id = "comp_exported_${packageInfo.packageName}",
-                title = "Může být ovládána jinými aplikacemi",
+                title = title,
                 description = "${scannedApp.appName} má $unprotectedCount nechráněných vstupních bodů.",
-                impact = "Jiné aplikace ve vašem telefonu mohou spouštět části této aplikace bez vašeho vědomí.",
+                impact = "Jiné aplikace mohou spouštět části této aplikace bez vašeho vědomí.",
                 category = IssueCategory.COMPONENTS,
                 severity = RiskLevel.LOW,
                 action = IssueAction.OpenPlayStore(packageInfo.packageName, "Zkontrolovat aktualizaci")
             ))
+            rawFindings.add(TrustRiskModel.RawFinding(
+                TrustRiskModel.FindingType.EXPORTED_COMPONENTS, RiskLevel.LOW, title, ""
+            ))
         }
         
-        // Suspicious native libraries - skip for trusted apps with verified cert
-        if (nativeLibAnalysis.hasSuspiciousLibs && 
-            !TrustedAppsWhitelist.shouldDowngradeFinding(
-                packageInfo.packageName, 
-                certFingerprint,
-                TrustedAppsWhitelist.FindingType.SUSPICIOUS_NATIVE_LIB
-            )) {
+        // Suspicious native libs (SOFT, unless device integrity fail → HARD)
+        if (nativeLibAnalysis.hasSuspiciousLibs) {
             val suspiciousLibs = nativeLibAnalysis.libraries.filter { it.isSuspicious }
+            val deviceCompromised = trustEvidence.deviceIntegrity.isRooted
+            val findingType = if (deviceCompromised) 
+                TrustRiskModel.FindingType.INTEGRITY_FAIL_WITH_HOOKING 
+            else 
+                TrustRiskModel.FindingType.SUSPICIOUS_NATIVE_LIB
+            val title = "Obsahuje neobvyklý kód"
+            
             issues.add(AppSecurityIssue(
                 id = "native_suspicious_${packageInfo.packageName}",
-                title = "Obsahuje neobvyklý kód",
+                title = title,
                 description = "${scannedApp.appName} obsahuje komponenty běžně používané nástroji pro obcházení zabezpečení.",
-                impact = "Tento typ kódu se někdy používá k získání root přístupu nebo ke skrývání aktivit před bezpečnostními nástroji.",
+                impact = "Tento typ kódu se někdy používá k získání root přístupu nebo ke skrývání aktivit.",
                 category = IssueCategory.NATIVE_CODE,
-                severity = RiskLevel.HIGH, // Downgraded from CRITICAL - let user decide
-                action = IssueAction.OpenSettings(
-                    Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-                    "Zvážit odinstalaci"
-                ),
+                severity = if (deviceCompromised) RiskLevel.CRITICAL else RiskLevel.HIGH,
+                action = IssueAction.OpenSettings(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, "Zvážit odinstalaci"),
                 technicalDetails = suspiciousLibs.map { "${it.name}: ${it.suspicionReason}" }.joinToString("\n")
             ))
-        }
-        
-        // Old target SDK
-        if (scannedApp.targetSdk > 0 && scannedApp.targetSdk < 29) { // Android 10
-            issues.add(AppSecurityIssue(
-                id = "sdk_old_${packageInfo.packageName}",
-                title = "Navržena pro starší Android",
-                description = "${scannedApp.appName} je navržena pro Android ${sdkToVersion(scannedApp.targetSdk)} " +
-                        "a nemusí respektovat moderní bezpečnostní omezení.",
-                impact = "Starší aplikace mohou obcházet oprávnění a přistupovat k datům způsobem, " +
-                        "který novější Android blokuje.",
-                category = IssueCategory.OUTDATED,
-                severity = if (scannedApp.targetSdk < 26) RiskLevel.MEDIUM else RiskLevel.LOW, // Downgraded
-                action = IssueAction.OpenPlayStore(packageInfo.packageName, "Zkontrolovat aktualizaci")
+            rawFindings.add(TrustRiskModel.RawFinding(
+                findingType, if (deviceCompromised) RiskLevel.CRITICAL else RiskLevel.HIGH, title, ""
             ))
         }
         
-        // Calculate overall risk
-        val overallRisk = when {
-            issues.any { it.severity == RiskLevel.CRITICAL } -> RiskLevel.CRITICAL
-            issues.count { it.severity == RiskLevel.HIGH } >= 2 -> RiskLevel.HIGH
-            issues.any { it.severity == RiskLevel.HIGH } -> RiskLevel.HIGH
-            issues.any { it.severity == RiskLevel.MEDIUM } -> RiskLevel.MEDIUM
-            issues.any { it.severity == RiskLevel.LOW } -> RiskLevel.LOW
-            else -> RiskLevel.NONE
+        // Old target SDK (SOFT)
+        if (scannedApp.targetSdk > 0 && scannedApp.targetSdk < 29) {
+            val title = "Navržena pro starší Android"
+            val severity = if (scannedApp.targetSdk < 26) RiskLevel.MEDIUM else RiskLevel.LOW
+            issues.add(AppSecurityIssue(
+                id = "sdk_old_${packageInfo.packageName}",
+                title = title,
+                description = "${scannedApp.appName} je navržena pro Android ${sdkToVersion(scannedApp.targetSdk)}.",
+                impact = "Starší aplikace mohou obcházet moderní bezpečnostní omezení.",
+                category = IssueCategory.OUTDATED,
+                severity = severity,
+                action = IssueAction.OpenPlayStore(packageInfo.packageName, "Zkontrolovat aktualizaci")
+            ))
+            rawFindings.add(TrustRiskModel.RawFinding(
+                TrustRiskModel.FindingType.OLD_TARGET_SDK, severity, title, ""
+            ))
         }
+        
+        // Installer anomaly for trusted-looking apps (HARD)
+        if (trustEvidence.certMatch.matchType == TrustEvidenceEngine.CertMatchType.DEVELOPER_MATCH &&
+            trustEvidence.installerInfo.installerType == TrustEvidenceEngine.InstallerType.SIDELOADED) {
+            val title = "Neobvyklý zdroj instalace"
+            issues.add(AppSecurityIssue(
+                id = "installer_anomaly_${packageInfo.packageName}",
+                title = title,
+                description = "${scannedApp.appName} od ověřeného vývojáře byla nainstalována mimo obchod.",
+                impact = "U ověřených aplikací je neobvyklé, aby byly instalovány ručně.",
+                category = IssueCategory.SIGNATURE,
+                severity = RiskLevel.MEDIUM,
+                action = IssueAction.OpenPlayStore(packageInfo.packageName, "Přeinstalovat z Play Store")
+            ))
+            rawFindings.add(TrustRiskModel.RawFinding(
+                TrustRiskModel.FindingType.INSTALLER_ANOMALY, RiskLevel.MEDIUM, title, ""
+            ))
+        }
+        
+        // ── 4. Produce verdict (Trust + Risk combined) ──
+        val verdict = trustRiskModel.evaluate(
+            packageName = packageInfo.packageName,
+            trustEvidence = trustEvidence,
+            rawFindings = rawFindings,
+            isSystemApp = scannedApp.isSystemApp
+        )
+        
+        // Overall risk — use verdict's effective risk, mapped to RiskLevel
+        val overallRisk = when (verdict.effectiveRisk) {
+            TrustRiskModel.EffectiveRisk.CRITICAL -> RiskLevel.CRITICAL
+            TrustRiskModel.EffectiveRisk.ELEVATED -> {
+                // Check if any hard findings elevate this
+                if (rawFindings.any { it.severity == RiskLevel.HIGH }) RiskLevel.HIGH
+                else RiskLevel.MEDIUM
+            }
+            TrustRiskModel.EffectiveRisk.LOW -> RiskLevel.LOW
+            TrustRiskModel.EffectiveRisk.NOMINAL -> RiskLevel.NONE
+        }
+        
+        // ── 5. Update baseline for next scan ──
+        baselineManager.updateBaseline(
+            packageName = packageInfo.packageName,
+            certSha256 = certFingerprint,
+            versionCode = scannedApp.versionCode,
+            versionName = scannedApp.versionName,
+            isSystemApp = scannedApp.isSystemApp,
+            installerPackage = installerPkg,
+            apkPath = scannedApp.apkPath
+        )
         
         return AppSecurityReport(
             app = scannedApp,
@@ -503,6 +612,9 @@ class AppSecurityScanner @Inject constructor(
             componentAnalysis = componentAnalysis,
             nativeLibAnalysis = nativeLibAnalysis,
             trustVerification = trustVerification,
+            trustEvidence = trustEvidence,
+            verdict = verdict,
+            baselineComparison = baselineComparison,
             overallRisk = overallRisk,
             issues = issues
         )

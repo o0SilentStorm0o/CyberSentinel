@@ -3,92 +3,147 @@ package com.cybersentinel.app.domain.security
 /**
  * Trusted Apps Whitelist & Human-Readable Interpretation
  * 
- * PRODUCT RULES:
- * - Whitelist = (packageName + signing cert SHA-256) - NIKDY jen packageName
- * - False positives = smrt důvěry - raději méně nálezů s vysokou jistotou
- * - Známé apps (Google, Meta, banky…) musí mít potlačené běžné nálezy
- * - Play Store policy compliance (no scareware)
+ * PRODUCT RULES (v2 — Evidence-based trust):
+ * - Whitelist = (packageName + signing cert SHA-256) — NIKDY jen packageName
+ * - Whitelist NENÍ imunita — pouze snížení váhy soft findings
+ * - Hard findings (debug cert, baseline mismatch…) NIKDY nepotlačí
+ * - Supports key rotation: multiple cert digests per app
+ * - Provides APIs for TrustEvidenceEngine (getVerifiedAppCerts, matchDeveloperCert)
  */
 
 /**
  * Secure whitelist requiring BOTH packageName AND SHA-256 certificate fingerprint.
- * This prevents bypass via re-signed APKs - packageName alone is NOT secure!
+ * Now supports:
+ * - Multiple cert digests per app (for key rotation)
+ * - Structured developer cert entries with metadata
+ * - APIs consumed by TrustEvidenceEngine
  */
 object TrustedAppsWhitelist {
     
-    /**
-     * Trusted developer certificates (SHA-256 fingerprints).
-     * An app is trusted ONLY if its certificate matches one of these AND
-     * the package name starts with the corresponding prefix.
-     * 
-     * Format: First 40 chars of SHA-256 hex (enough for uniqueness, collision-resistant)
-     */
-    private val trustedDeveloperCerts = mapOf(
-        // Google - official release signing certificate
-        // This covers com.google.*, com.android.* apps from Google
-        "38918A453D07199354F8B19AF05EC6562CED5788" to setOf(
-            "com.google.", 
-            "com.android."
+    // ──────────────────────────────────────────────────────────
+    //  Developer certs (prefix-based matching)
+    // ──────────────────────────────────────────────────────────
+
+    data class DeveloperEntry(
+        val name: String,
+        /** All known cert digests (current + historical for rotation) */
+        val certDigests: Set<String>,
+        /** Package prefixes this developer owns */
+        val packagePrefixes: Set<String>
+    )
+
+    private val trustedDevelopers = listOf(
+        DeveloperEntry(
+            name = "Google",
+            certDigests = setOf(
+                "38918A453D07199354F8B19AF05EC6562CED5788"
+                // Add rotated/historical Google certs here
+            ),
+            packagePrefixes = setOf("com.google.", "com.android.")
         ),
-        
-        // Meta/Facebook - official release signing certificate
-        "A4B94B07E5D7D8E3E7D5B5B5B5B5B5B5B5B5B5B5" to setOf(
-            "com.facebook.",
-            "com.instagram.",
-            "com.whatsapp",
-            "com.meta."
+        DeveloperEntry(
+            name = "Meta",
+            certDigests = setOf(
+                "A4B94B07E5D7D8E3E7D5B5B5B5B5B5B5B5B5B5B5"
+            ),
+            packagePrefixes = setOf("com.facebook.", "com.instagram.", "com.whatsapp", "com.meta.")
         ),
-        
-        // Microsoft - official release signing certificate  
-        "C3D3E3F3F3F3F3F3F3F3F3F3F3F3F3F3F3F3F3F3" to setOf(
-            "com.microsoft."
+        DeveloperEntry(
+            name = "Microsoft",
+            certDigests = setOf(
+                "C3D3E3F3F3F3F3F3F3F3F3F3F3F3F3F3F3F3F3F3"
+            ),
+            packagePrefixes = setOf("com.microsoft.")
         ),
-        
-        // Samsung - official release signing certificate
-        "34DF0E7A9F1B2C3D4E5F6A7B8C9D0E1F2A3B4C5D" to setOf(
-            "com.samsung.",
-            "com.sec.android."
+        DeveloperEntry(
+            name = "Samsung",
+            certDigests = setOf(
+                "34DF0E7A9F1B2C3D4E5F6A7B8C9D0E1F2A3B4C5D"
+            ),
+            packagePrefixes = setOf("com.samsung.", "com.sec.android.")
         )
-        
-        // Note: More certs can be added after verifying real fingerprints
-        // For banks and other apps, we use a separate verified list below
     )
-    
+
+    // ──────────────────────────────────────────────────────────
+    //  Verified apps (exact package match, multiple certs for rotation)
+    // ──────────────────────────────────────────────────────────
+
     /**
-     * Explicitly verified apps with their known SHA-256 fingerprints.
-     * These are verified individually (packageName + cert must BOTH match).
-     * 
-     * Key = package name, Value = SHA-256 fingerprint prefix (40 chars)
+     * Key = package name, Value = set of allowed cert digest prefixes.
+     * Multiple entries support key rotation — ANY of the certs is valid.
+     *
+     * Note: Replace placeholder fingerprints with real ones from APK analysis
      */
-    private val verifiedApps = mapOf(
-        // Czech Banks - each bank's official cert
-        "cz.airbank.android" to "AIR1B2C3D4E5F6A7B8C9D0E1F2A3B4C5D6E7F8A9B",
-        "cz.csob.smartbanking" to "CSOB1B2C3D4E5F6A7B8C9D0E1F2A3B4C5D6E7F8A",
-        "cz.csas.georgego" to "CSAS1B2C3D4E5F6A7B8C9D0E1F2A3B4C5D6E7F8A",
-        "cz.kb.mobilebanking" to "KB001B2C3D4E5F6A7B8C9D0E1F2A3B4C5D6E7F8A",
-        "eu.inmite.prj.rb.mobilebanking" to "RB001B2C3D4E5F6A7B8C9D0E1F2A3B4C5D6E7F8",
-        "cz.fio.ib2" to "FIO01B2C3D4E5F6A7B8C9D0E1F2A3B4C5D6E7F8A",
-        "cz.moneta.smartbanka" to "MONE1B2C3D4E5F6A7B8C9D0E1F2A3B4C5D6E7F8A",
+    private val verifiedApps: Map<String, Set<String>> = mapOf(
+        // Czech Banks
+        "cz.airbank.android" to setOf("AIR1B2C3D4E5F6A7B8C9D0E1F2A3B4C5D6E7F8A9B"),
+        "cz.csob.smartbanking" to setOf("CSOB1B2C3D4E5F6A7B8C9D0E1F2A3B4C5D6E7F8A"),
+        "cz.csas.georgego" to setOf("CSAS1B2C3D4E5F6A7B8C9D0E1F2A3B4C5D6E7F8A"),
+        "cz.kb.mobilebanking" to setOf("KB001B2C3D4E5F6A7B8C9D0E1F2A3B4C5D6E7F8A"),
+        "eu.inmite.prj.rb.mobilebanking" to setOf("RB001B2C3D4E5F6A7B8C9D0E1F2A3B4C5D6E7F8"),
+        "cz.fio.ib2" to setOf("FIO01B2C3D4E5F6A7B8C9D0E1F2A3B4C5D6E7F8A"),
+        "cz.moneta.smartbanka" to setOf("MONE1B2C3D4E5F6A7B8C9D0E1F2A3B4C5D6E7F8A"),
         
-        // Major apps - each with their official cert
-        "com.spotify.music" to "SPOT1B2C3D4E5F6A7B8C9D0E1F2A3B4C5D6E7F8A",
-        "com.netflix.mediaclient" to "NETF1B2C3D4E5F6A7B8C9D0E1F2A3B4C5D6E7F8",
-        "com.twitter.android" to "TWIT1B2C3D4E5F6A7B8C9D0E1F2A3B4C5D6E7F8A",
-        "com.snapchat.android" to "SNAP1B2C3D4E5F6A7B8C9D0E1F2A3B4C5D6E7F8A",
-        "org.telegram.messenger" to "TELE1B2C3D4E5F6A7B8C9D0E1F2A3B4C5D6E7F8A",
-        "com.discord" to "DISC1B2C3D4E5F6A7B8C9D0E1F2A3B4C5D6E7F8A",
-        "com.viber.voip" to "VIBE1B2C3D4E5F6A7B8C9D0E1F2A3B4C5D6E7F8A",
-        "com.dropbox.android" to "DROP1B2C3D4E5F6A7B8C9D0E1F2A3B4C5D6E7F8A",
-        "org.mozilla.firefox" to "MOZI1B2C3D4E5F6A7B8C9D0E1F2A3B4C5D6E7F8A",
-        "com.brave.browser" to "BRAV1B2C3D4E5F6A7B8C9D0E1F2A3B4C5D6E7F8A",
-        "com.duckduckgo.mobile.android" to "DUCK1B2C3D4E5F6A7B8C9D0E1F2A3B4C5D6E7F8"
-        
-        // Note: Replace placeholder fingerprints with real ones from actual APK analysis
+        // Major apps (can have multiple certs for rotation)
+        "com.spotify.music" to setOf("SPOT1B2C3D4E5F6A7B8C9D0E1F2A3B4C5D6E7F8A"),
+        "com.netflix.mediaclient" to setOf("NETF1B2C3D4E5F6A7B8C9D0E1F2A3B4C5D6E7F8"),
+        "com.twitter.android" to setOf("TWIT1B2C3D4E5F6A7B8C9D0E1F2A3B4C5D6E7F8A"),
+        "com.snapchat.android" to setOf("SNAP1B2C3D4E5F6A7B8C9D0E1F2A3B4C5D6E7F8A"),
+        "org.telegram.messenger" to setOf("TELE1B2C3D4E5F6A7B8C9D0E1F2A3B4C5D6E7F8A"),
+        "com.discord" to setOf("DISC1B2C3D4E5F6A7B8C9D0E1F2A3B4C5D6E7F8A"),
+        "com.viber.voip" to setOf("VIBE1B2C3D4E5F6A7B8C9D0E1F2A3B4C5D6E7F8A"),
+        "com.dropbox.android" to setOf("DROP1B2C3D4E5F6A7B8C9D0E1F2A3B4C5D6E7F8A"),
+        "org.mozilla.firefox" to setOf("MOZI1B2C3D4E5F6A7B8C9D0E1F2A3B4C5D6E7F8A"),
+        "com.brave.browser" to setOf("BRAV1B2C3D4E5F6A7B8C9D0E1F2A3B4C5D6E7F8A"),
+        "com.duckduckgo.mobile.android" to setOf("DUCK1B2C3D4E5F6A7B8C9D0E1F2A3B4C5D6E7F8")
     )
-    
+
+    // ──────────────────────────────────────────────────────────
+    //  APIs for TrustEvidenceEngine
+    // ──────────────────────────────────────────────────────────
+
     /**
-     * Verification result for trusted app check
+     * Get all known cert digests for a verified app (supports rotation).
+     * Returns null if the app is not in the verified list.
      */
+    fun getVerifiedAppCerts(packageName: String): Set<String>? {
+        return verifiedApps[packageName]
+    }
+
+    /**
+     * Result of matching a package against developer cert entries
+     */
+    data class DeveloperCertMatch(
+        val developerName: String,
+        val expectedCert: String,
+        val certMatches: Boolean
+    )
+
+    /**
+     * Match a package name against developer cert entries.
+     * Returns null if package doesn't match any developer prefix.
+     */
+    fun matchDeveloperCert(packageName: String, certPrefix: String): DeveloperCertMatch? {
+        for (dev in trustedDevelopers) {
+            val matchesPrefix = dev.packagePrefixes.any { packageName.startsWith(it) }
+            if (matchesPrefix) {
+                val certMatches = dev.certDigests.any { knownCert ->
+                    certPrefix.startsWith(knownCert) || knownCert.startsWith(certPrefix)
+                }
+                return DeveloperCertMatch(
+                    developerName = dev.name,
+                    expectedCert = dev.certDigests.first(), // Primary cert
+                    certMatches = certMatches
+                )
+            }
+        }
+        return null
+    }
+
+    // ──────────────────────────────────────────────────────────
+    //  Legacy verification API (still used by AppSecurityScanner for now)
+    // ──────────────────────────────────────────────────────────
+
     data class TrustVerification(
         val isTrusted: Boolean,
         val reason: TrustReason,
@@ -96,76 +151,49 @@ object TrustedAppsWhitelist {
     )
     
     enum class TrustReason {
-        VERIFIED_DEVELOPER_CERT,   // Package + cert matches trusted developer
-        VERIFIED_APP_CERT,         // Package + cert matches individual verified app
-        UNKNOWN_CERT,              // Package matches but cert doesn't (POSSIBLE RE-SIGN!)
-        UNKNOWN_PACKAGE            // Package not in whitelist
+        VERIFIED_DEVELOPER_CERT,
+        VERIFIED_APP_CERT,
+        UNKNOWN_CERT,
+        UNKNOWN_PACKAGE
     }
-    
-    /**
-     * Verify if an app is trusted based on BOTH packageName AND certificate.
-     * 
-     * @param packageName The app's package name
-     * @param certSha256 The SHA-256 fingerprint of the app's signing certificate
-     * @return TrustVerification with detailed result
-     */
+
     fun verifyTrustedApp(packageName: String, certSha256: String): TrustVerification {
         val certPrefix = certSha256.take(40).uppercase()
         
-        // 1. Check individual verified apps first (exact match required)
-        val expectedCert = verifiedApps[packageName]
-        if (expectedCert != null) {
-            return if (certPrefix.startsWith(expectedCert) || expectedCert.startsWith(certPrefix)) {
+        // 1. Check individual verified apps (now with rotation support)
+        val appCerts = verifiedApps[packageName]
+        if (appCerts != null) {
+            val matches = appCerts.any { knownDigest ->
+                certPrefix.startsWith(knownDigest) || knownDigest.startsWith(certPrefix)
+            }
+            return if (matches) {
                 TrustVerification(true, TrustReason.VERIFIED_APP_CERT, packageName)
             } else {
-                // Package matches but CERT DOESN'T - possible re-signed APK!
                 TrustVerification(false, TrustReason.UNKNOWN_CERT, null)
             }
         }
         
         // 2. Check developer certificate + package prefix
-        for ((developerCert, packagePrefixes) in trustedDeveloperCerts) {
-            val matchesPrefix = packagePrefixes.any { packageName.startsWith(it) }
-            if (matchesPrefix) {
-                return if (certPrefix.startsWith(developerCert) || developerCert.startsWith(certPrefix)) {
-                    val developerName = when {
-                        packageName.startsWith("com.google.") || packageName.startsWith("com.android.") -> "Google"
-                        packageName.startsWith("com.facebook.") || packageName.startsWith("com.instagram.") ||
-                        packageName.startsWith("com.whatsapp") || packageName.startsWith("com.meta.") -> "Meta"
-                        packageName.startsWith("com.microsoft.") -> "Microsoft"
-                        packageName.startsWith("com.samsung.") || packageName.startsWith("com.sec.android.") -> "Samsung"
-                        else -> null
-                    }
-                    TrustVerification(true, TrustReason.VERIFIED_DEVELOPER_CERT, developerName)
-                } else {
-                    // Package prefix matches but CERT DOESN'T - possible re-signed APK!
-                    TrustVerification(false, TrustReason.UNKNOWN_CERT, null)
-                }
+        val devMatch = matchDeveloperCert(packageName, certPrefix)
+        if (devMatch != null) {
+            return if (devMatch.certMatches) {
+                TrustVerification(true, TrustReason.VERIFIED_DEVELOPER_CERT, devMatch.developerName)
+            } else {
+                TrustVerification(false, TrustReason.UNKNOWN_CERT, null)
             }
         }
         
         // 3. Not in whitelist
         return TrustVerification(false, TrustReason.UNKNOWN_PACKAGE, null)
     }
-    
+
+    // ──────────────────────────────────────────────────────────
+    //  Finding downgrade (legacy — will be replaced by TrustRiskModel)
+    // ──────────────────────────────────────────────────────────
+
     /**
-     * Simple trusted check (backwards compatibility) - DEPRECATED, use verifyTrustedApp
-     * This will return false for better security until cert is verified.
-     */
-    @Deprecated("Use verifyTrustedApp() with certificate fingerprint for secure verification")
-    fun isTrustedApp(packageName: String): Boolean {
-        // Without certificate, we cannot trust - return false for security
-        // This forces callers to use the secure verifyTrustedApp() method
-        return false
-    }
-    
-    /**
-     * For trusted apps (verified with cert), certain findings should be downgraded.
-     * 
-     * @param packageName The app's package name
-     * @param certSha256 The SHA-256 fingerprint of the app's signing certificate
-     * @param findingType The type of finding to potentially downgrade
-     * @return true if finding should be downgraded/hidden
+     * DEPRECATED: Use TrustRiskModel for proper hard/soft finding classification.
+     * Kept for backward compatibility during migration.
      */
     fun shouldDowngradeFinding(
         packageName: String, 
@@ -176,26 +204,14 @@ object TrustedAppsWhitelist {
         if (!verification.isTrusted) return false
         
         return when (findingType) {
-            // Trusted apps legitimately need many permissions
+            // SOFT findings — trust CAN downgrade
             FindingType.OVER_PRIVILEGED -> true
-            // Trusted apps often have exported components for integrations
             FindingType.EXPORTED_COMPONENTS -> true
-            // Old SDK target - still warn even for trusted apps
-            FindingType.OLD_TARGET_SDK -> false
-            // Debug signature - always warn (shouldn't happen for trusted apps)
-            FindingType.DEBUG_SIGNATURE -> false
-            // Native libs in trusted apps are OK
             FindingType.SUSPICIOUS_NATIVE_LIB -> true
+            // HARD findings — trust NEVER downgrades
+            FindingType.OLD_TARGET_SDK -> false
+            FindingType.DEBUG_SIGNATURE -> false
         }
-    }
-    
-    /**
-     * Legacy overload without cert - NEVER downgrades (secure by default)
-     */
-    @Deprecated("Use shouldDowngradeFinding() with certificate fingerprint")
-    fun shouldDowngradeFinding(packageName: String, findingType: FindingType): Boolean {
-        // Without certificate verification, never downgrade - security first
-        return false
     }
     
     enum class FindingType {
