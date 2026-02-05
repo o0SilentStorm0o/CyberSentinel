@@ -1,10 +1,12 @@
 package com.cybersentinel.app.ui.screens.appscan
 
-import androidx.compose.animation.*
+import android.util.Log
 import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -25,7 +27,8 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.cybersentinel.app.domain.security.AppSecurityScanner.*
 import com.cybersentinel.app.domain.security.RiskLabels
-import com.cybersentinel.app.domain.security.resolveAction
+
+private const val TAG = "AppScanScreen"
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -36,6 +39,12 @@ fun AppScanScreen(
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     
+    // Debug logging
+    LaunchedEffect(uiState.isScanning, uiState.reports.size, uiState.filter) {
+        Log.d(TAG, "UI State: isScanning=${uiState.isScanning}, " +
+            "reports=${uiState.reports.size}, filter=${uiState.filter}, " +
+            "error=${uiState.error}, summary=${uiState.summary != null}")
+    }
     Scaffold(
         topBar = {
             TopAppBar(
@@ -120,25 +129,44 @@ fun AppScanScreen(
                         }
                     }
                     
-                    LazyColumn(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .weight(1f),
-                        contentPadding = PaddingValues(16.dp),
-                        verticalArrangement = Arrangement.spacedBy(12.dp)
-                    ) {
-                        items(
-                            items = filteredReports,
-                            key = { it.app.packageName }
-                        ) { report ->
-                            AppReportCard(
-                                report = report,
-                                onClick = { onNavigateToAppDetail(report.app.packageName) }
+                    Log.d(TAG, "LazyColumn: filteredReports=${filteredReports.size}, " +
+                        "first3=${filteredReports.take(3).map { it.app.appName }}")
+                    
+                    if (filteredReports.isEmpty()) {
+                        // Show empty filter state
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .weight(1f),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = "Žádné aplikace v tomto filtru",
+                                style = MaterialTheme.typography.bodyLarge,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
-                        
-                        item {
-                            Spacer(Modifier.height(80.dp))
+                    } else {
+                        LazyColumn(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .weight(1f),
+                            contentPadding = PaddingValues(16.dp),
+                            verticalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            items(
+                                items = filteredReports,
+                                key = { it.app.packageName }
+                            ) { report ->
+                                AppReportCard(
+                                    report = report,
+                                    onClick = { onNavigateToAppDetail(report.app.packageName) }
+                                )
+                            }
+                            
+                            item {
+                                Spacer(Modifier.height(80.dp))
+                            }
                         }
                     }
                 }
@@ -388,6 +416,7 @@ private fun FilterChipRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .horizontalScroll(rememberScrollState())
             .padding(horizontal = 16.dp, vertical = 8.dp),
         horizontalArrangement = Arrangement.spacedBy(8.dp)
     ) {
@@ -430,377 +459,177 @@ private fun AppReportCard(
     
     // Use human-readable risk labels
     val riskLabel = RiskLabels.getLabel(report.overallRisk)
-    val riskColor = Color(riskLabel.color)
+    val riskColor = Color(riskLabel.color.toInt())
     
     // Use secure trust verification (packageName + SHA-256 cert)
     val isTrusted = report.trustVerification.isTrusted
     val developerName = report.trustVerification.developerName
     
     Card(
-        onClick = { expanded = !expanded },
-        modifier = Modifier.fillMaxWidth()
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 2.dp),
+        onClick = { expanded = !expanded }
     ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(16.dp)
+                .padding(12.dp)
         ) {
-            // Header row
+            // Compact header row
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // Risk indicator
+                // Risk indicator dot
                 Box(
                     modifier = Modifier
-                        .size(12.dp)
+                        .size(10.dp)
                         .clip(CircleShape)
                         .background(riskColor)
                 )
                 
-                Spacer(Modifier.width(12.dp))
+                Spacer(Modifier.width(10.dp))
                 
-                // App info
-                Column(modifier = Modifier.weight(1f)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            text = report.app.appName,
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.Medium,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.weight(1f, fill = false)
-                        )
-                        if (isTrusted) {
-                            Spacer(Modifier.width(6.dp))
-                            Icon(
-                                imageVector = Icons.Default.Verified,
-                                contentDescription = developerName?.let { "Ověřeno: $it" } ?: "Ověřený vývojář",
-                                tint = Color(0xFF2196F3),
-                                modifier = Modifier.size(16.dp)
-                            )
-                        }
-                    }
-                    // Human-readable status instead of package name
-                    Text(
-                        text = riskLabel.shortDescription,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
-                
-                // User-friendly risk badge
-                Surface(
-                    color = riskColor.copy(alpha = 0.1f),
-                    shape = RoundedCornerShape(8.dp)
-                ) {
-                    Text(
-                        text = riskLabel.badge,
-                        style = MaterialTheme.typography.labelMedium,
-                        color = riskColor,
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
-                    )
-                }
+                // App name
+                Text(
+                    text = report.app.appName,
+                    style = MaterialTheme.typography.bodyLarge,
+                    fontWeight = FontWeight.Medium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
                 
                 Spacer(Modifier.width(8.dp))
                 
+                // Risk badge
+                Text(
+                    text = riskLabel.badge,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = riskColor
+                )
+                
+                // Expand icon
                 Icon(
                     imageVector = if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
                     contentDescription = null,
+                    modifier = Modifier.size(20.dp),
                     tint = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
             
-            // Quick summary - user friendly
-            Spacer(Modifier.height(8.dp))
-            
-            // Show main concern in simple terms
+            // Main concern (one-liner under the name)
             val mainConcern = when {
-                report.signatureAnalysis.isDebugSigned -> 
-                    "Může jít o neoficiální verzi aplikace"
-                report.nativeLibAnalysis.hasSuspiciousLibs -> 
-                    "Obsahuje neobvyklý kód"
-                report.permissionAnalysis.isOverPrivileged -> 
-                    "Má více oprávnění než potřebuje"
-                report.issues.any { it.severity == RiskLevel.CRITICAL } ->
-                    "Vyžaduje vaši pozornost"
-                report.app.targetSdk < 29 ->
-                    "Navržena pro starší Android"
+                report.signatureAnalysis.isDebugSigned -> "Může jít o neoficiální verzi"
+                report.nativeLibAnalysis.hasSuspiciousLibs -> "Obsahuje neobvyklý kód"
+                report.permissionAnalysis.isOverPrivileged -> "Má více oprávnění než potřebuje"
+                report.app.targetSdk in 1..28 -> "Navržena pro starší Android"
+                report.issues.isNotEmpty() -> riskLabel.shortDescription
                 else -> null
             }
             
-            mainConcern?.let { concern ->
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(
-                            riskColor.copy(alpha = 0.1f),
-                            RoundedCornerShape(8.dp)
-                        )
-                        .padding(10.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Info,
-                        contentDescription = null,
-                        tint = riskColor,
-                        modifier = Modifier.size(18.dp)
-                    )
-                    Spacer(Modifier.width(8.dp))
-                    Text(
-                        text = concern,
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
-                }
+            mainConcern?.let {
+                Text(
+                    text = it,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(start = 20.dp, top = 2.dp)
+                )
             }
             
-            // Expanded content
-            AnimatedVisibility(visible = expanded) {
-                Column(modifier = Modifier.padding(top = 12.dp)) {
-                    HorizontalDivider()
-                    Spacer(Modifier.height(12.dp))
-                    
-                    // Dangerous permissions - user friendly title
-                    if (report.permissionAnalysis.dangerousPermissions.isNotEmpty()) {
-                        Text(
-                            text = "K čemu má aplikace přístup",
-                            style = MaterialTheme.typography.labelLarge,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                        Spacer(Modifier.height(8.dp))
-                        
-                        report.permissionAnalysis.dangerousPermissions
-                            .filter { it.isGranted }
-                            .take(5)
-                            .forEach { perm ->
-                                PermissionRow(permission = perm)
-                            }
-                        
-                        val hiddenCount = report.permissionAnalysis.dangerousPermissions
-                            .count { it.isGranted } - 5
-                        if (hiddenCount > 0) {
-                            Text(
-                                text = "... a $hiddenCount dalších",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.padding(start = 32.dp, top = 4.dp)
-                            )
-                        }
-                    }
-                    
-                    // Issues - user friendly title
-                    if (report.issues.isNotEmpty()) {
-                        Spacer(Modifier.height(12.dp))
-                        Text(
-                            text = "Co doporučujeme zkontrolovat",
-                            style = MaterialTheme.typography.labelLarge,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                        Spacer(Modifier.height(8.dp))
-                        
-                        report.issues.take(3).forEach { issue ->
-                            IssueRow(
-                                issue = issue,
-                                onActionClick = { 
-                                    resolveAction(context, com.cybersentinel.app.domain.security.SecurityIssue(
-                                        id = issue.id,
-                                        title = issue.title,
-                                        description = issue.description,
-                                        impact = issue.impact,
-                                        severity = when (issue.severity) {
-                                            RiskLevel.CRITICAL -> com.cybersentinel.app.domain.security.SecurityIssue.Severity.CRITICAL
-                                            RiskLevel.HIGH -> com.cybersentinel.app.domain.security.SecurityIssue.Severity.HIGH
-                                            RiskLevel.MEDIUM -> com.cybersentinel.app.domain.security.SecurityIssue.Severity.MEDIUM
-                                            RiskLevel.LOW -> com.cybersentinel.app.domain.security.SecurityIssue.Severity.LOW
-                                            RiskLevel.NONE -> com.cybersentinel.app.domain.security.SecurityIssue.Severity.INFO
-                                        },
-                                        category = com.cybersentinel.app.domain.security.SecurityIssue.Category.APPS,
-                                        action = issue.action
-                                    ))
-                                }
-                            )
-                        }
-                    }
-                    
-                    // Signature info
-                    Spacer(Modifier.height(12.dp))
+            // Expanded details
+            if (expanded) {
+                Spacer(Modifier.height(8.dp))
+                HorizontalDivider()
+                Spacer(Modifier.height(8.dp))
+                
+                // Granted dangerous permissions
+                val grantedPerms = report.permissionAnalysis.dangerousPermissions.filter { it.isGranted }
+                if (grantedPerms.isNotEmpty()) {
                     Text(
-                        text = "Podpis aplikace",
-                        style = MaterialTheme.typography.labelLarge,
+                        text = "K čemu má aplikace přístup",
+                        style = MaterialTheme.typography.labelMedium,
                         fontWeight = FontWeight.SemiBold
                     )
-                    Spacer(Modifier.height(8.dp))
+                    Spacer(Modifier.height(4.dp))
                     
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(
-                            imageVector = if (report.signatureAnalysis.isDebugSigned) 
-                                Icons.Default.Warning else Icons.Default.Verified,
-                            contentDescription = null,
-                            tint = if (report.signatureAnalysis.isDebugSigned) 
-                                Color(0xFFFF9800) else Color(0xFF4CAF50),
-                            modifier = Modifier.size(20.dp)
-                        )
-                        Spacer(Modifier.width(8.dp))
-                        Column {
+                    grantedPerms.take(5).forEach { perm ->
+                        Row(
+                            modifier = Modifier.padding(vertical = 2.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
                             Text(
-                                text = report.signatureAnalysis.signatureScheme,
-                                style = MaterialTheme.typography.bodyMedium
+                                text = perm.category.icon,
+                                modifier = Modifier.width(24.dp)
                             )
                             Text(
-                                text = if (report.signatureAnalysis.isDebugSigned) 
-                                    "Debug certifikát - neoficiální build" 
-                                else "Validní produkční podpis",
+                                text = "${perm.shortName} — ${perm.description}",
                                 style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f)
                             )
                         }
                     }
                     
-                    // Technical details
-                    Spacer(Modifier.height(12.dp))
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        TechDetail("Target SDK", "Android ${report.app.targetSdk}")
-                        TechDetail("Nativní kód", if (report.nativeLibAnalysis.hasNativeCode) "Ano" else "Ne")
-                        TechDetail("Velikost", formatSize(report.app.apkSizeBytes))
+                    val remaining = grantedPerms.size - 5
+                    if (remaining > 0) {
+                        Text(
+                            text = "… a $remaining dalších",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(start = 24.dp)
+                        )
                     }
+                }
+                
+                // Issues
+                if (report.issues.isNotEmpty()) {
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        text = "Co doporučujeme zkontrolovat",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    
+                    report.issues.take(3).forEach { issue ->
+                        Row(
+                            modifier = Modifier.padding(vertical = 2.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(6.dp)
+                                    .clip(CircleShape)
+                                    .background(Color(issue.severity.color.toInt()))
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                text = issue.title,
+                                style = MaterialTheme.typography.bodySmall,
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                    }
+                }
+                
+                // Tech details row
+                Spacer(Modifier.height(8.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text("SDK ${report.app.targetSdk}", style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(report.signatureAnalysis.signatureScheme, style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(formatSize(report.app.apkSizeBytes), style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
         }
-    }
-}
-
-@Composable
-private fun QuickStat(
-    icon: ImageVector,
-    value: String,
-    label: String
-) {
-    Row(
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Icon(
-            imageVector = icon,
-            contentDescription = null,
-            modifier = Modifier.size(16.dp),
-            tint = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-        Spacer(Modifier.width(4.dp))
-        Text(
-            text = value,
-            style = MaterialTheme.typography.labelMedium,
-            fontWeight = FontWeight.SemiBold
-        )
-        Spacer(Modifier.width(4.dp))
-        Text(
-            text = label,
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-    }
-}
-
-@Composable
-private fun PermissionRow(permission: PermissionDetail) {
-    val riskColor = Color(permission.riskLevel.color)
-    
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 4.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Text(
-            text = permission.category.icon,
-            modifier = Modifier.width(24.dp)
-        )
-        Spacer(Modifier.width(8.dp))
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = permission.shortName,
-                style = MaterialTheme.typography.bodyMedium
-            )
-            Text(
-                text = permission.description,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-        }
-        Surface(
-            color = riskColor.copy(alpha = 0.1f),
-            shape = RoundedCornerShape(4.dp)
-        ) {
-            Text(
-                text = permission.riskLevel.label,
-                style = MaterialTheme.typography.labelSmall,
-                color = riskColor,
-                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-            )
-        }
-    }
-}
-
-@Composable
-private fun IssueRow(
-    issue: AppSecurityIssue,
-    onActionClick: () -> Unit
-) {
-    val severityColor = Color(issue.severity.color)
-    
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 4.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Box(
-            modifier = Modifier
-                .size(8.dp)
-                .clip(CircleShape)
-                .background(severityColor)
-        )
-        Spacer(Modifier.width(12.dp))
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = issue.title,
-                style = MaterialTheme.typography.bodyMedium
-            )
-            Text(
-                text = issue.impact,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis
-            )
-        }
-        TextButton(onClick = onActionClick) {
-            Text("Opravit")
-        }
-    }
-}
-
-@Composable
-private fun TechDetail(label: String, value: String) {
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        Text(
-            text = value,
-            style = MaterialTheme.typography.bodyMedium,
-            fontWeight = FontWeight.SemiBold
-        )
-        Text(
-            text = label,
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
     }
 }
 

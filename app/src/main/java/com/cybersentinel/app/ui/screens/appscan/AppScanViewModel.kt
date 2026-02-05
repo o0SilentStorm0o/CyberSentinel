@@ -1,5 +1,6 @@
 package com.cybersentinel.app.ui.screens.appscan
 
+import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.cybersentinel.app.domain.security.AppSecurityScanner
@@ -13,6 +14,8 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import javax.inject.Inject
+
+private const val TAG = "AppScanVM"
 
 data class AppScanUiState(
     val isScanning: Boolean = false,
@@ -39,6 +42,7 @@ class AppScanViewModel @Inject constructor(
     
     fun startScan() {
         viewModelScope.launch {
+            Log.d(TAG, "startScan: BEGIN")
             _uiState.update { it.copy(isScanning = true, scanProgress = 0f, error = null) }
             
             try {
@@ -46,7 +50,13 @@ class AppScanViewModel @Inject constructor(
                     appScanner.scanAllApps(includeSystem = _uiState.value.includeSystemApps)
                 }
                 
+                Log.d(TAG, "startScan: got ${reports.size} reports")
+                
                 val summary = appScanner.getScanSummary(reports)
+                
+                Log.d(TAG, "startScan: summary total=${summary.totalAppsScanned}, " +
+                    "critical=${summary.criticalRiskApps}, high=${summary.highRiskApps}, " +
+                    "safe=${summary.safeApps}")
                 
                 _uiState.update {
                     it.copy(
@@ -57,7 +67,13 @@ class AppScanViewModel @Inject constructor(
                         currentScanningApp = null
                     )
                 }
+                
+                Log.d(TAG, "startScan: state updated, isScanning=${_uiState.value.isScanning}, " +
+                    "reports.size=${_uiState.value.reports.size}, " +
+                    "filter=${_uiState.value.filter}")
+                
             } catch (e: Exception) {
+                Log.e(TAG, "startScan: ERROR", e)
                 _uiState.update {
                     it.copy(
                         isScanning = false,
