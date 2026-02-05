@@ -46,6 +46,10 @@ class AppPreferences @Inject constructor(
     private val CACHE_SIZE_KEY = intPreferencesKey("cache_size")
     private val DEBUG_MODE_KEY = booleanPreferencesKey("debug_mode")
     
+    // Email monitoring & Premium
+    private val MONITORED_EMAIL_KEY = stringPreferencesKey("monitored_email")
+    private val IS_PREMIUM_KEY = booleanPreferencesKey("is_premium")
+    
     // Theme Management
     val isDarkTheme: Flow<Boolean> = context.dataStore.data
         .map { preferences -> preferences[THEME_KEY] ?: false }
@@ -176,6 +180,30 @@ class AppPreferences @Inject constructor(
     suspend fun setDebugMode(enabled: Boolean) {
         context.dataStore.edit { preferences ->
             preferences[DEBUG_MODE_KEY] = enabled
+        }
+    }
+    
+    // Email Monitoring
+    val monitoredEmail: Flow<String?> = context.dataStore.data
+        .map { preferences -> preferences[MONITORED_EMAIL_KEY] }
+    
+    suspend fun setMonitoredEmail(email: String?) {
+        context.dataStore.edit { preferences ->
+            if (email.isNullOrBlank()) {
+                preferences.remove(MONITORED_EMAIL_KEY)
+            } else {
+                preferences[MONITORED_EMAIL_KEY] = email
+            }
+        }
+    }
+    
+    // Premium Status
+    val isPremium: Flow<Boolean> = context.dataStore.data
+        .map { preferences -> preferences[IS_PREMIUM_KEY] ?: false }
+    
+    suspend fun setPremium(premium: Boolean) {
+        context.dataStore.edit { preferences ->
+            preferences[IS_PREMIUM_KEY] = premium
         }
     }
     

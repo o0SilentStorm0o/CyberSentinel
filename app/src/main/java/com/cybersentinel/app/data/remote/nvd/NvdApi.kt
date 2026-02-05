@@ -10,12 +10,12 @@ interface NvdApi {
     @GET("rest/json/cves/2.0")
     @Headers("User-Agent: CyberSentinel/1.0 (Android)")
     suspend fun search(
-        @Query("pubStartDate") start: String,           // ISO 8601, např. 2025-09-21T21:18:00Z
+        @Query("pubStartDate") start: String,
         @Query("pubEndDate") end: String,
         @Query("startIndex") startIndex: Int = 0,
         @Query("resultsPerPage") rpp: Int = 50,
-        @Query("virtualMatchString") vms: String,       // !!! místo cpeName
-        @Query("apiKey") apiKey: String? = null         // volitelné (vyšší limity)
+        @Query("virtualMatchString") vms: String,
+        @Query("apiKey") apiKey: String? = null
     ): NvdResponse
 }
 

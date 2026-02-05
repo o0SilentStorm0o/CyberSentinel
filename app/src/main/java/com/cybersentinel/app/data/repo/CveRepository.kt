@@ -57,8 +57,7 @@ class CveRepository @Inject constructor(
     ): List<CveItem> {
         val end = ZonedDateTime.now(ZoneOffset.UTC)
         val wantedStart = end.minusDays(daysBack.toLong())
-        
-        // NVD omezuje okno na max. 120 dní, takže "osekáme" start na max. 119 dní zpět
+
         val start = if (Duration.between(wantedStart, end).toDays() > 119) {
             end.minusDays(119)
         } else {
@@ -71,7 +70,6 @@ class CveRepository @Inject constructor(
 
         val vmsTargets = buildList {
             add("cpe:2.3:o:google:android:*")
-            // Přidáme i Chrome/WebView pro broader coverage
             add("cpe:2.3:a:google:chrome:*")
             add("cpe:2.3:a:google:android_webview:*")
         }
@@ -91,22 +89,19 @@ class CveRepository @Inject constructor(
                 )
                 results += nvdToDomain(resp)
             } catch (e: Exception) {
-                // Log error ale pokračuj s dalšími VMS targets
                 continue
             }
         }
 
-        // sloučení, deduplikace dle id
         return results.distinctBy { it.id }
     }
 
-    // CIRCL fallback – ponechávám původní metody
     suspend fun loadLatest(): List<CveItem> {
         return circlApi.last()
             .asSequence()
             .map { it.toDomain() }
-            .filter { it.id != "—" && it.summary != "—" } // něco se rozumně namapovalo
-            .take(50) // omez na prvních 50 položek
+            .filter { it.id != "—" && it.summary != "—" }
+            .take(50)
             .toList()
     }
 

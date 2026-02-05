@@ -21,9 +21,7 @@ import kotlin.math.max
 
 interface HibpApiService {
     @Headers(
-        // HIBP doporučuje posílat UA; některé proxy bez něj blokují
         "User-Agent: CyberSentinel/1.0 (+https://github.com/yourrepo)",
-        // Dobrovolné – přidá padding do odpovědi (ochrana proti timing attacks)
         "Add-Padding: true"
     )
     @GET("range/{prefix}")
@@ -85,7 +83,7 @@ class HibpPasswordChecker @Inject constructor() {
     private val api: HibpApiService = HibpApiService.create()
     
     // Prefix cache s TTL pro optimalizaci
-    private val ttlMs = 10 * 60 * 1000L // 10 minut
+    private val ttlMs = 10 * 60 * 1000L
     private val prefixCache = object : LinkedHashMap<String, Pair<Long, String>>(64, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Pair<Long, String>>?) =
             size > 128
@@ -251,31 +249,31 @@ class HibpPasswordChecker @Inject constructor() {
 
         when {
             breachCount > 100_000 -> {
-                rec += "🚨 Heslo bylo kompromitováno $breachCount× – změňte ho IHNED."
-                rec += "🔐 Aktivujte 2FA tam, kde to jde."
+                rec += "Heslo bylo kompromitováno $breachCount× – změňte ho IHNED."
+                rec += "Aktivujte 2FA tam, kde to jde."
             }
             breachCount > 10_000 -> {
-                rec += "⚠️ Heslo je velmi časté v únicích ($breachCount×)."
-                rec += "🔄 Změňte ho a nepoužívejte znovu."
+                rec += "Heslo je velmi časté v únicích ($breachCount×)."
+                rec += "Změňte ho a nepoužívejte znovu."
             }
             breachCount > 0 -> {
-                rec += "⚠️ Heslo se v únicích vyskytuje ($breachCount×). Zvažte změnu."
+                rec += "Heslo se v únicích vyskytuje ($breachCount×). Zvažte změnu."
             }
-            else -> rec += "✅ Heslo nebylo nalezeno v známých únicích."
+            else -> rec += "Heslo nebylo nalezeno v známých únicích."
         }
 
-        if (password.size < 12) rec += "📏 Cílte na délku 12+ znaků."
+        if (password.size < 12) rec += "Cílte na délku 12+ znaků."
         val s = password.concatToString()
         val hasLower = s.any(Char::isLowerCase)
         val hasUpper = s.any(Char::isUpperCase)
         val hasDigit = s.any(Char::isDigit)
         val hasSpecial = s.any { !it.isLetterOrDigit() }
         if (listOf(hasLower, hasUpper, hasDigit, hasSpecial).count { it } < 3) {
-            rec += "🔤 Kombinujte velká/malá písmena, čísla a speciální znaky."
+            rec += "Kombinujte velká/malá písmena, čísla a speciální znaky."
         }
 
         if (breachCount == 0L && strength.level >= StrengthLevel.STRONG) {
-            rec += "🛡️ Silné heslo – dobrá práce!"
+            rec += "Silné heslo – dobrá práce!"
         }
         return rec
     }

@@ -24,15 +24,13 @@ class CveCheckWorker @AssistedInject constructor(
 
     override suspend fun doWork(): Result {
         return try {
-            // Refresh KEV catalog if stale
             kevCatalog.refreshIfStale()
-            
-            // Fetch latest 7 days relevant (network + cache)
+
             val fresh = repo.searchNvdForDevice(
                 daysBack = 7,
                 page = 0,
                 pageSize = 50,
-                profile = repo.getDeviceProfile() // We'll add this method
+                profile = repo.getDeviceProfile()
             ).filter { item ->
                 // High score or KEV
                 val isKev = kevCatalog.isKev(item.id)

@@ -12,6 +12,7 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
+import com.cybersentinel.app.ui.screens.dashboard.DashboardScreen
 import com.cybersentinel.ui.screens.home.HomeScreen
 import com.cybersentinel.ui.screens.qr.QrScannerScreen
 import com.cybersentinel.ui.screens.wifi.WifiAuditorScreen
@@ -33,11 +34,15 @@ fun CyberSentinelNavigation(
     ) { innerPadding ->
         NavHost(
             navController = navController,
-            startDestination = Screen.Home.route,
+            startDestination = Screen.Dashboard.route,
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
         ) {
+            composable(Screen.Dashboard.route) {
+                DashboardScreen()
+            }
+            
             composable(Screen.Home.route) {
                 HomeScreen()
             }
