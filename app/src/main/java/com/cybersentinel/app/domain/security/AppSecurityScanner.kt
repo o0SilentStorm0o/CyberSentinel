@@ -614,8 +614,11 @@ class AppSecurityScanner @Inject constructor(
                 // Try to determine permission type
                 try {
                     val pInfo = pm.getPermissionInfo(permission, 0)
-                    when {
-                        pInfo.protection == android.content.pm.PermissionInfo.PROTECTION_DANGEROUS -> {
+                    // Use protectionLevel with bitmask (works on all API levels)
+                    // protection is API 28+, protectionLevel works everywhere
+                    val baseProtection = pInfo.protectionLevel and android.content.pm.PermissionInfo.PROTECTION_MASK_BASE
+                    when (baseProtection) {
+                        android.content.pm.PermissionInfo.PROTECTION_DANGEROUS -> {
                             dangerousPerms.add(PermissionDetail(
                                 permission = permission,
                                 shortName = permission.substringAfterLast("."),
@@ -625,7 +628,7 @@ class AppSecurityScanner @Inject constructor(
                                 description = "Nebezpečné oprávnění"
                             ))
                         }
-                        pInfo.protection == android.content.pm.PermissionInfo.PROTECTION_SIGNATURE -> {
+                        android.content.pm.PermissionInfo.PROTECTION_SIGNATURE -> {
                             signaturePerms.add(permission)
                         }
                         else -> normalPerms.add(permission)
