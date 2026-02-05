@@ -64,9 +64,15 @@ class DashboardViewModel @Inject constructor(
                         id = "app_vuln_${vuln.app.packageName}",
                         title = "Zranitelná aplikace: ${vuln.app.appName}",
                         description = vuln.description,
+                        impact = "Útočník může zneužít známou zranitelnost v této aplikaci k získání přístupu k vašim datům nebo kontroly nad zařízením.",
                         severity = SecurityIssue.Severity.HIGH,
                         category = SecurityIssue.Category.APPS,
-                        actionLabel = "Aktualizovat"
+                        action = IssueAction.OpenPlayStore(
+                            packageName = vuln.app.packageName,
+                            label = "Aktualizovat v Play Store"
+                        ),
+                        confidence = SecurityIssue.Confidence.MEDIUM,
+                        source = "CVE databáze"
                     )
                 }
                 

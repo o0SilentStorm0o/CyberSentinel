@@ -1,8 +1,12 @@
 package com.cybersentinel.app.ui.screens.dashboard
 
+import android.content.Intent
+import android.net.Uri
+import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -18,15 +22,19 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.cybersentinel.app.domain.security.ActionType
+import com.cybersentinel.app.domain.security.IssueAction
 import com.cybersentinel.app.domain.security.ScoreLevel
 import com.cybersentinel.app.domain.security.SecurityIssue
 import com.cybersentinel.app.domain.security.SecurityScore
+import com.cybersentinel.app.domain.security.resolveAction
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -295,6 +303,9 @@ private fun IssueCard(
     issue: SecurityIssue,
     onClick: () -> Unit
 ) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    var expanded by remember { mutableStateOf(false) }
+    
     val severityColor = when (issue.severity) {
         SecurityIssue.Severity.CRITICAL -> Color(0xFFF44336)
         SecurityIssue.Severity.HIGH -> Color(0xFFFF9800)
@@ -312,56 +323,197 @@ private fun IssueCard(
     }
     
     Card(
-        onClick = onClick,
+        onClick = { expanded = !expanded },
         modifier = Modifier.fillMaxWidth()
     ) {
-        Row(
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(16.dp),
-            verticalAlignment = Alignment.CenterVertically
+                .padding(16.dp)
         ) {
-            // Severity indicator
-            Box(
-                modifier = Modifier
-                    .size(8.dp)
-                    .clip(CircleShape)
-                    .background(severityColor)
-            )
-            
-            Spacer(Modifier.width(12.dp))
-            
-            // Category icon
-            Icon(
-                imageVector = categoryIcon,
-                contentDescription = null,
-                modifier = Modifier.size(24.dp),
-                tint = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            
-            Spacer(Modifier.width(12.dp))
-            
-            // Content
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = issue.title,
-                    style = MaterialTheme.typography.bodyLarge,
-                    fontWeight = FontWeight.Medium
+            // Header row
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // Severity indicator
+                Box(
+                    modifier = Modifier
+                        .size(10.dp)
+                        .clip(CircleShape)
+                        .background(severityColor)
                 )
-                Text(
-                    text = issue.description,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                
+                Spacer(Modifier.width(12.dp))
+                
+                // Category icon
+                Icon(
+                    imageVector = categoryIcon,
+                    contentDescription = null,
+                    modifier = Modifier.size(24.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                
+                Spacer(Modifier.width(12.dp))
+                
+                // Title and severity badge
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = issue.title,
+                        style = MaterialTheme.typography.bodyLarge,
+                        fontWeight = FontWeight.Medium
+                    )
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = issue.severity.label,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = severityColor
+                        )
+                        if (issue.confidence != SecurityIssue.Confidence.HIGH) {
+                            Text(
+                                text = "• ${issue.confidence.label} jistota",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+                
+                // Expand icon
+                Icon(
+                    imageVector = if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                    contentDescription = if (expanded) "Sbalit" else "Rozbalit",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
             
-            // Action
-            issue.actionLabel?.let {
-                Icon(
-                    imageVector = Icons.Default.ChevronRight,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+            // Expanded content
+            if (expanded) {
+                Spacer(Modifier.height(12.dp))
+                
+                // Description
+                Text(
+                    text = issue.description,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+                
+                Spacer(Modifier.height(8.dp))
+                
+                // Impact (why it matters)
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(
+                            severityColor.copy(alpha = 0.1f),
+                            RoundedCornerShape(8.dp)
+                        )
+                        .padding(12.dp),
+                    verticalAlignment = Alignment.Top
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Warning,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp),
+                        tint = severityColor
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        text = issue.impact,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                }
+                
+                // Source and confidence
+                issue.source?.let { source ->
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        text = "Zdroj: $source",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                
+                // Action button
+                if (issue.action !is IssueAction.None) {
+                    Spacer(Modifier.height(12.dp))
+                    
+                    val actionLabel = when (val action = issue.action) {
+                        is IssueAction.OpenSettings -> action.label
+                        is IssueAction.OpenPlayStore -> action.label
+                        is IssueAction.OpenUrl -> action.label
+                        is IssueAction.InAppAction -> action.label
+                        IssueAction.None -> ""
+                    }
+                    
+                    Button(
+                        onClick = {
+                            when (val action = issue.action) {
+                                is IssueAction.OpenSettings -> {
+                                    try {
+                                        context.startActivity(
+                                            android.content.Intent(action.settingsAction).apply {
+                                                flags = android.content.Intent.FLAG_ACTIVITY_NEW_TASK
+                                            }
+                                        )
+                                    } catch (e: Exception) {
+                                        // Fallback to main settings
+                                        context.startActivity(
+                                            android.content.Intent(android.provider.Settings.ACTION_SETTINGS).apply {
+                                                flags = android.content.Intent.FLAG_ACTIVITY_NEW_TASK
+                                            }
+                                        )
+                                    }
+                                }
+                                is IssueAction.OpenPlayStore -> {
+                                    try {
+                                        context.startActivity(
+                                            android.content.Intent(
+                                                android.content.Intent.ACTION_VIEW,
+                                                android.net.Uri.parse("market://details?id=${action.packageName}")
+                                            ).apply {
+                                                flags = android.content.Intent.FLAG_ACTIVITY_NEW_TASK
+                                            }
+                                        )
+                                    } catch (e: Exception) {
+                                        // Fallback to web
+                                        context.startActivity(
+                                            android.content.Intent(
+                                                android.content.Intent.ACTION_VIEW,
+                                                android.net.Uri.parse("https://play.google.com/store/apps/details?id=${action.packageName}")
+                                            )
+                                        )
+                                    }
+                                }
+                                is IssueAction.OpenUrl -> {
+                                    context.startActivity(
+                                        android.content.Intent(
+                                            android.content.Intent.ACTION_VIEW,
+                                            android.net.Uri.parse(action.url)
+                                        )
+                                    )
+                                }
+                                is IssueAction.InAppAction -> {
+                                    onClick()
+                                }
+                                IssueAction.None -> {}
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.OpenInNew,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(actionLabel)
+                    }
+                }
             }
         }
     }
