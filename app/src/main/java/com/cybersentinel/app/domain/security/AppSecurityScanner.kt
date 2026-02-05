@@ -341,31 +341,36 @@ class AppSecurityScanner @Inject constructor(
         
         val issues = mutableListOf<AppSecurityIssue>()
         
+        // Check if app is from a trusted developer (Google, Meta, Microsoft, etc.)
+        val isTrustedApp = TrustedAppsWhitelist.isTrustedApp(packageInfo.packageName)
+        
         // Collect issues from all analyses
+        // For trusted apps, skip certain false-positive findings
         issues.addAll(signatureAnalysis.issues.mapIndexed { i, issue ->
             AppSecurityIssue(
                 id = "sig_${packageInfo.packageName}_$i",
-                title = "Problém s podpisem aplikace",
-                description = issue,
-                impact = "Aplikace mohla být modifikována nebo pochází z nedůvěryhodného zdroje.",
+                title = "Může jít o neoficiální verzi", // User-friendly title
+                description = "${scannedApp.appName} je podepsána vývojářským certifikátem, což znamená, že nepochází z oficiálního obchodu.",
+                impact = "Upravené aplikace mohou obsahovat škodlivý kód. Doporučujeme stáhnout aplikaci z Google Play.",
                 category = IssueCategory.SIGNATURE,
                 severity = if (signatureAnalysis.isDebugSigned) RiskLevel.HIGH else RiskLevel.MEDIUM,
                 action = IssueAction.OpenPlayStore(packageInfo.packageName, "Přeinstalovat z Play Store")
             )
         })
         
-        // Permission issues
-        if (permissionAnalysis.isOverPrivileged) {
+        // Permission issues - skip for trusted apps (they legitimately need many permissions)
+        if (permissionAnalysis.isOverPrivileged && 
+            !TrustedAppsWhitelist.shouldDowngradeFinding(packageInfo.packageName, TrustedAppsWhitelist.FindingType.OVER_PRIVILEGED)) {
             issues.add(AppSecurityIssue(
                 id = "perm_overprivileged_${packageInfo.packageName}",
                 title = "Nadměrná oprávnění",
-                description = "Aplikace ${scannedApp.appName} má více oprávnění než potřebuje pro svou funkci.",
-                impact = "Aplikace může sbírat data, která nepotřebuje. Vaše soukromí může být ohroženo.",
+                description = "${scannedApp.appName} má více oprávnění, než byste od aplikace tohoto typu očekávali.",
+                impact = "Aplikace může sbírat data, která ke své funkci nepotřebuje. Vaše soukromí může být ohroženo.",
                 category = IssueCategory.PERMISSIONS,
                 severity = RiskLevel.MEDIUM,
                 action = IssueAction.OpenSettings(
                     Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-                    "Spravovat oprávnění"
+                    "Zkontrolovat oprávnění"
                 ),
                 technicalDetails = "Kritická oprávnění: ${permissionAnalysis.dangerousPermissions
                     .filter { it.isGranted }
@@ -391,36 +396,38 @@ class AppSecurityScanner @Inject constructor(
                 ))
             }
         
-        // Exported components without protection
-        if (componentAnalysis.hasExportedRisks) {
+        // Exported components without protection - skip for trusted apps
+        if (componentAnalysis.hasExportedRisks && 
+            !TrustedAppsWhitelist.shouldDowngradeFinding(packageInfo.packageName, TrustedAppsWhitelist.FindingType.EXPORTED_COMPONENTS)) {
             val unprotectedCount = componentAnalysis.exportedActivities.count { !it.isProtected } +
                     componentAnalysis.exportedServices.count { !it.isProtected } +
                     componentAnalysis.exportedReceivers.count { !it.isProtected }
             
             issues.add(AppSecurityIssue(
                 id = "comp_exported_${packageInfo.packageName}",
-                title = "Nechráněné komponenty",
-                description = "Aplikace má $unprotectedCount exportovaných komponent bez ochrany.",
-                impact = "Jiné aplikace mohou spouštět části této aplikace bez vašeho vědomí.",
+                title = "Může být ovládána jinými aplikacemi",
+                description = "${scannedApp.appName} má $unprotectedCount nechráněných vstupních bodů.",
+                impact = "Jiné aplikace ve vašem telefonu mohou spouštět části této aplikace bez vašeho vědomí.",
                 category = IssueCategory.COMPONENTS,
-                severity = RiskLevel.MEDIUM,
+                severity = RiskLevel.LOW, // Downgraded - usually not critical for regular users
                 action = IssueAction.OpenPlayStore(packageInfo.packageName, "Zkontrolovat aktualizaci")
             ))
         }
         
-        // Suspicious native libraries
-        if (nativeLibAnalysis.hasSuspiciousLibs) {
+        // Suspicious native libraries - skip for trusted apps (they may legitimately use these)
+        if (nativeLibAnalysis.hasSuspiciousLibs && 
+            !TrustedAppsWhitelist.shouldDowngradeFinding(packageInfo.packageName, TrustedAppsWhitelist.FindingType.SUSPICIOUS_NATIVE_LIB)) {
             val suspiciousLibs = nativeLibAnalysis.libraries.filter { it.isSuspicious }
             issues.add(AppSecurityIssue(
                 id = "native_suspicious_${packageInfo.packageName}",
-                title = "Podezřelý nativní kód",
-                description = "Aplikace obsahuje podezřelé knihovny: ${suspiciousLibs.joinToString { it.name }}",
-                impact = "Tyto knihovny mohou být použity pro skrývání škodlivé aktivity nebo rootování zařízení.",
+                title = "Obsahuje neobvyklý kód",
+                description = "${scannedApp.appName} obsahuje komponenty běžně používané nástroji pro obcházení zabezpečení.",
+                impact = "Tento typ kódu se někdy používá k získání root přístupu nebo ke skrývání aktivit před bezpečnostními nástroji.",
                 category = IssueCategory.NATIVE_CODE,
-                severity = RiskLevel.CRITICAL,
+                severity = RiskLevel.HIGH, // Downgraded from CRITICAL - let user decide
                 action = IssueAction.OpenSettings(
                     Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-                    "Odinstalovat aplikaci"
+                    "Zvážit odinstalaci"
                 ),
                 technicalDetails = suspiciousLibs.map { "${it.name}: ${it.suspicionReason}" }.joinToString("\n")
             ))
@@ -430,11 +437,13 @@ class AppSecurityScanner @Inject constructor(
         if (scannedApp.targetSdk > 0 && scannedApp.targetSdk < 29) { // Android 10
             issues.add(AppSecurityIssue(
                 id = "sdk_old_${packageInfo.packageName}",
-                title = "Zastaralá aplikace",
-                description = "Aplikace cílí na Android ${sdkToVersion(scannedApp.targetSdk)} (SDK ${scannedApp.targetSdk}).",
-                impact = "Starší aplikace nemusí respektovat novější bezpečnostní omezení Androidu.",
+                title = "Navržena pro starší Android",
+                description = "${scannedApp.appName} je navržena pro Android ${sdkToVersion(scannedApp.targetSdk)} " +
+                        "a nemusí respektovat moderní bezpečnostní omezení.",
+                impact = "Starší aplikace mohou obcházet oprávnění a přistupovat k datům způsobem, " +
+                        "který novější Android blokuje.",
                 category = IssueCategory.OUTDATED,
-                severity = if (scannedApp.targetSdk < 26) RiskLevel.HIGH else RiskLevel.MEDIUM,
+                severity = if (scannedApp.targetSdk < 26) RiskLevel.MEDIUM else RiskLevel.LOW, // Downgraded
                 action = IssueAction.OpenPlayStore(packageInfo.packageName, "Zkontrolovat aktualizaci")
             ))
         }

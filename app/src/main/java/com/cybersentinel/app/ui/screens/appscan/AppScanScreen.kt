@@ -24,6 +24,8 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.cybersentinel.app.domain.security.AppSecurityScanner.*
+import com.cybersentinel.app.domain.security.RiskLabels
+import com.cybersentinel.app.domain.security.TrustedAppsWhitelist
 import com.cybersentinel.app.domain.security.resolveAction
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -197,75 +199,118 @@ private fun ScanningProgress(
 
 @Composable
 private fun ScanSummaryCard(summary: ScanSummary) {
+    val hasIssues = summary.criticalRiskApps > 0 || summary.highRiskApps > 0
+    
     Card(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(16.dp)
+            .padding(16.dp),
+        colors = if (hasIssues) CardDefaults.cardColors() 
+                 else CardDefaults.cardColors(containerColor = Color(0xFF4CAF50).copy(alpha = 0.1f))
     ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(16.dp)
         ) {
+            // User-friendly headline
+            Row(
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    imageVector = if (hasIssues) Icons.Default.Info else Icons.Default.CheckCircle,
+                    contentDescription = null,
+                    tint = if (hasIssues) MaterialTheme.colorScheme.primary else Color(0xFF4CAF50),
+                    modifier = Modifier.size(24.dp)
+                )
+                Spacer(Modifier.width(12.dp))
+                Text(
+                    text = if (hasIssues) 
+                        "Některé aplikace vyžadují vaši pozornost"
+                    else 
+                        "Vaše aplikace jsou v pořádku",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
+            
+            Spacer(Modifier.height(8.dp))
+            
+            // Human-readable summary
             Text(
-                text = "Výsledky skenování",
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold
+                text = buildString {
+                    append("Zkontrolovali jsme ${summary.totalAppsScanned} aplikací. ")
+                    if (summary.criticalRiskApps > 0) {
+                        append("${summary.criticalRiskApps} vyžaduje okamžitou pozornost. ")
+                    }
+                    if (summary.highRiskApps > 0) {
+                        append("${summary.highRiskApps} doporučujeme zkontrolovat. ")
+                    }
+                    if (summary.safeApps > 0 && !hasIssues) {
+                        append("Všechny aplikace splňují bezpečnostní standardy.")
+                    }
+                },
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
             )
             
             Spacer(Modifier.height(16.dp))
             
+            // Stats row - simplified
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceEvenly
             ) {
-                StatItem(
-                    value = summary.totalAppsScanned.toString(),
-                    label = "Aplikací",
-                    icon = Icons.Default.Apps,
-                    color = MaterialTheme.colorScheme.primary
-                )
-                StatItem(
-                    value = summary.criticalRiskApps.toString(),
-                    label = "Kritických",
-                    icon = Icons.Default.Error,
-                    color = Color(0xFFF44336)
-                )
-                StatItem(
-                    value = summary.highRiskApps.toString(),
-                    label = "Vysoké riziko",
-                    icon = Icons.Default.Warning,
-                    color = Color(0xFFFF9800)
-                )
+                if (summary.criticalRiskApps + summary.highRiskApps > 0) {
+                    StatItem(
+                        value = (summary.criticalRiskApps + summary.highRiskApps).toString(),
+                        label = "Ke kontrole",
+                        icon = Icons.Default.Warning,
+                        color = Color(0xFFFF9800)
+                    )
+                }
                 StatItem(
                     value = summary.safeApps.toString(),
-                    label = "Bezpečných",
+                    label = "V pořádku",
                     icon = Icons.Default.CheckCircle,
                     color = Color(0xFF4CAF50)
                 )
+                StatItem(
+                    value = summary.totalAppsScanned.toString(),
+                    label = "Celkem",
+                    icon = Icons.Default.Apps,
+                    color = MaterialTheme.colorScheme.primary
+                )
             }
             
-            if (summary.overPrivilegedApps > 0 || summary.suspiciousNativeApps > 0) {
+            // Privacy hint if over-privileged apps found
+            if (summary.overPrivilegedApps > 0) {
                 Spacer(Modifier.height(12.dp))
                 HorizontalDivider()
                 Spacer(Modifier.height(12.dp))
                 
                 Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(16.dp)
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(
+                            Color(0xFFFF9800).copy(alpha = 0.1f),
+                            RoundedCornerShape(8.dp)
+                        )
+                        .padding(12.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    if (summary.overPrivilegedApps > 0) {
-                        WarningChip(
-                            text = "${summary.overPrivilegedApps} nadměrná oprávnění",
-                            color = Color(0xFFFF9800)
-                        )
-                    }
-                    if (summary.suspiciousNativeApps > 0) {
-                        WarningChip(
-                            text = "${summary.suspiciousNativeApps} podezřelý kód",
-                            color = Color(0xFFF44336)
-                        )
-                    }
+                    Icon(
+                        imageVector = Icons.Default.PrivacyTip,
+                        contentDescription = null,
+                        tint = Color(0xFFFF9800),
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Spacer(Modifier.width(12.dp))
+                    Text(
+                        text = "${summary.overPrivilegedApps} aplikací má více oprávnění, než pravděpodobně potřebuje",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
                 }
             }
         }
@@ -379,7 +424,10 @@ private fun AppReportCard(
     val context = LocalContext.current
     var expanded by remember { mutableStateOf(false) }
     
-    val riskColor = Color(report.overallRisk.color)
+    // Use human-readable risk labels
+    val riskLabel = RiskLabels.getLabel(report.overallRisk)
+    val riskColor = Color(riskLabel.color)
+    val isTrusted = TrustedAppsWhitelist.isTrustedApp(report.app.packageName)
     
     Card(
         onClick = { expanded = !expanded },
@@ -407,15 +455,28 @@ private fun AppReportCard(
                 
                 // App info
                 Column(modifier = Modifier.weight(1f)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = report.app.appName,
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Medium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f, fill = false)
+                        )
+                        if (isTrusted) {
+                            Spacer(Modifier.width(6.dp))
+                            Icon(
+                                imageVector = Icons.Default.Verified,
+                                contentDescription = "Důvěryhodný vývojář",
+                                tint = Color(0xFF2196F3),
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+                    }
+                    // Human-readable status instead of package name
                     Text(
-                        text = report.app.appName,
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Medium,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    Text(
-                        text = report.app.packageName,
+                        text = riskLabel.shortDescription,
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1,
@@ -423,13 +484,13 @@ private fun AppReportCard(
                     )
                 }
                 
-                // Risk badge
+                // User-friendly risk badge
                 Surface(
                     color = riskColor.copy(alpha = 0.1f),
                     shape = RoundedCornerShape(8.dp)
                 ) {
                     Text(
-                        text = report.overallRisk.label,
+                        text = riskLabel.badge,
                         style = MaterialTheme.typography.labelMedium,
                         color = riskColor,
                         modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
@@ -445,29 +506,46 @@ private fun AppReportCard(
                 )
             }
             
-            // Quick stats row
+            // Quick summary - user friendly
             Spacer(Modifier.height(8.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(16.dp)
-            ) {
-                QuickStat(
-                    icon = Icons.Default.Shield,
-                    value = "${report.permissionAnalysis.dangerousPermissions.count { it.isGranted }}",
-                    label = "rizikových oprávnění"
-                )
-                if (report.issues.isNotEmpty()) {
-                    QuickStat(
-                        icon = Icons.Default.BugReport,
-                        value = "${report.issues.size}",
-                        label = "problémů"
+            
+            // Show main concern in simple terms
+            val mainConcern = when {
+                report.signatureAnalysis.isDebugSigned -> 
+                    "Může jít o neoficiální verzi aplikace"
+                report.nativeLibAnalysis.hasSuspiciousLibs -> 
+                    "Obsahuje neobvyklý kód"
+                report.permissionAnalysis.isOverPrivileged -> 
+                    "Má více oprávnění než potřebuje"
+                report.issues.any { it.severity == RiskLevel.CRITICAL } ->
+                    "Vyžaduje vaši pozornost"
+                report.app.targetSdk < 29 ->
+                    "Navržena pro starší Android"
+                else -> null
+            }
+            
+            mainConcern?.let { concern ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(
+                            riskColor.copy(alpha = 0.1f),
+                            RoundedCornerShape(8.dp)
+                        )
+                        .padding(10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Info,
+                        contentDescription = null,
+                        tint = riskColor,
+                        modifier = Modifier.size(18.dp)
                     )
-                }
-                if (report.permissionAnalysis.isOverPrivileged) {
-                    QuickStat(
-                        icon = Icons.Default.PrivacyTip,
-                        value = "⚠️",
-                        label = "nadměrná oprávnění"
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        text = concern,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface
                     )
                 }
             }
@@ -478,10 +556,10 @@ private fun AppReportCard(
                     HorizontalDivider()
                     Spacer(Modifier.height(12.dp))
                     
-                    // Dangerous permissions
+                    // Dangerous permissions - user friendly title
                     if (report.permissionAnalysis.dangerousPermissions.isNotEmpty()) {
                         Text(
-                            text = "Riziková oprávnění",
+                            text = "K čemu má aplikace přístup",
                             style = MaterialTheme.typography.labelLarge,
                             fontWeight = FontWeight.SemiBold
                         )
@@ -506,11 +584,11 @@ private fun AppReportCard(
                         }
                     }
                     
-                    // Issues
+                    // Issues - user friendly title
                     if (report.issues.isNotEmpty()) {
                         Spacer(Modifier.height(12.dp))
                         Text(
-                            text = "Nalezené problémy",
+                            text = "Co doporučujeme zkontrolovat",
                             style = MaterialTheme.typography.labelLarge,
                             fontWeight = FontWeight.SemiBold
                         )
