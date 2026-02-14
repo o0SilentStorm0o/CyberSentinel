@@ -190,12 +190,16 @@ enum class EngineSource {
 data class LlmStructuredSlots(
     /** LLM's severity assessment (may be validated/overridden by PolicyGuard) */
     val assessedSeverity: IncidentSeverity,
+    /** Summary tone directive: calm / neutral / strict */
+    val summaryTone: SummaryTone = SummaryTone.NEUTRAL,
     /** Ordered evidence IDs the LLM considers most relevant */
     val selectedEvidenceIds: List<String>,
     /** Ordered action categories the LLM recommends */
     val recommendedActions: List<ActionCategory>,
     /** LLM's confidence in its assessment (0.0-1.0) */
     val confidence: Double,
+    /** Optional: short free-text notes (1-2 sentences max, may be empty) */
+    val notes: String? = null,
     /** Optional: LLM's reasoning chain (for debugging/audit, not shown to user) */
     val reasoningTrace: String? = null,
     /** Whether the LLM thinks this can be safely ignored */
@@ -203,3 +207,15 @@ data class LlmStructuredSlots(
     /** Ignore reason key (maps to template) */
     val ignoreReasonKey: String? = null
 )
+
+/**
+ * Summary tone directive from LLM — controls template rendering style.
+ */
+enum class SummaryTone {
+    /** Reassuring, low urgency */
+    CALM,
+    /** Factual, balanced */
+    NEUTRAL,
+    /** Direct, emphasizes risk */
+    STRICT
+}
