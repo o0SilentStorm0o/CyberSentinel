@@ -127,4 +127,11 @@ dependencies {
     
 // Permissions for camera
     implementation("com.google.accompanist:accompanist-permissions:0.32.0")
+
+// Testing
+    testImplementation("junit:junit:4.13.2")
+}
+
+kapt {
+    correctErrorTypes = true
 }

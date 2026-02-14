@@ -12,6 +12,8 @@ import androidx.room.PrimaryKey
  *  - versionCode / versionName: detect updates
  *  - isSystemApp: partition info
  *  - firstSeenAt / lastSeenAt: detect new appearances
+ *  - permissionSetHash: sorted permission list hash for delta detection
+ *  - exported component counts: attack surface delta tracking
  */
 @Entity(tableName = "app_baseline")
 data class AppBaselineEntity(
@@ -49,5 +51,44 @@ data class AppBaselineEntity(
     val previousCertSha256: String? = null,
     
     /** How many times we've scanned this app */
-    val scanCount: Int = 1
+    val scanCount: Int = 1,
+    
+    // ── Permission baseline (v4) ──
+    
+    /** SHA-256 hash of sorted permission set — detects permission delta between scans */
+    val permissionSetHash: String? = null,
+    
+    /** Comma-separated list of high-risk permissions (SMS/Accessibility/DeviceAdmin/VPN) at baseline */
+    val highRiskPermissions: String? = null,
+    
+    // ── Exported surface baseline (v4) ──
+    
+    /** Count of exported activities */
+    val exportedActivityCount: Int = 0,
+    
+    /** Count of exported services */
+    val exportedServiceCount: Int = 0,
+    
+    /** Count of exported receivers */
+    val exportedReceiverCount: Int = 0,
+    
+    /** Count of exported providers */
+    val exportedProviderCount: Int = 0,
+    
+    /** Count of exported components without permission protection */
+    val unprotectedExportedCount: Int = 0,
+
+    // ── Time correlation fields (v5) ──
+
+    /** Timestamp of last app update (versionCode change) */
+    val lastUpdateAt: Long? = null,
+
+    /** Timestamp of last installer change (e.g., Play Store → sideload) */
+    val lastInstallerChangeAt: Long? = null,
+
+    /** Timestamp of last high-risk permission addition */
+    val lastHighRiskPermAddedAt: Long? = null,
+
+    /** Timestamp of last special access enablement (accessibility, notif listener, etc.) */
+    val lastSpecialAccessEnabledAt: Long? = null
 )

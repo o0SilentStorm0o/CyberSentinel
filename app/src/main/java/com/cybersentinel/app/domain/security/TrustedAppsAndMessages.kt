@@ -332,7 +332,8 @@ object HumanReadableMessages {
 }
 
 /**
- * Risk category labels for app cards - user-friendly descriptions
+ * Risk category labels for app cards - user-friendly descriptions.
+ * Now supports both legacy RiskLevel labels and new 4-state verdict labels.
  */
 object RiskLabels {
     
@@ -349,9 +350,9 @@ object RiskLabels {
                 shortDescription = "Doporučujeme zkontrolovat nastavení této aplikace"
             )
             AppSecurityScanner.RiskLevel.MEDIUM -> RiskLabel(
-                badge = "Upozornění",
-                color = 0xFFFFEB3B,
-                shortDescription = "Nalezeny drobné nedostatky"
+                badge = "Informace",
+                color = 0xFF2196F3,
+                shortDescription = "Má přístup k některým funkcím"
             )
             AppSecurityScanner.RiskLevel.LOW -> RiskLabel(
                 badge = "V pořádku",
@@ -360,7 +361,35 @@ object RiskLabels {
             )
             AppSecurityScanner.RiskLevel.NONE -> RiskLabel(
                 badge = "Bezpečná",
+                color = 0xFF4CAF50,
+                shortDescription = "Aplikace splňuje bezpečnostní standardy"
+            )
+        }
+    }
+    
+    /**
+     * New 4-state verdict labels (primary system)
+     */
+    fun getVerdictLabel(verdict: TrustRiskModel.EffectiveRisk): RiskLabel {
+        return when (verdict) {
+            TrustRiskModel.EffectiveRisk.CRITICAL -> RiskLabel(
+                badge = "Vyžaduje pozornost",
+                color = 0xFFF44336,
+                shortDescription = "Tato aplikace vykazuje neobvyklé chování"
+            )
+            TrustRiskModel.EffectiveRisk.NEEDS_ATTENTION -> RiskLabel(
+                badge = "Ke kontrole",
+                color = 0xFFFF9800,
+                shortDescription = "Doporučujeme zkontrolovat"
+            )
+            TrustRiskModel.EffectiveRisk.INFO -> RiskLabel(
+                badge = "Informace",
                 color = 0xFF2196F3,
+                shortDescription = "Má přístup k některým funkcím zařízení"
+            )
+            TrustRiskModel.EffectiveRisk.SAFE -> RiskLabel(
+                badge = "Bezpečná",
+                color = 0xFF4CAF50,
                 shortDescription = "Aplikace splňuje bezpečnostní standardy"
             )
         }
@@ -374,7 +403,11 @@ object RiskLabels {
 }
 
 /**
- * App category detection for better context
+ * App category detection for contextual permission evaluation.
+ * 
+ * Key design: permissions that are "expected" for a category are NOT alarming.
+ * Camera app having CAMERA is normal. Calculator having CAMERA is suspicious.
+ * But "suspicious" alone is just INFO for unknown apps, not an alarm.
  */
 object AppCategoryDetector {
     
@@ -383,23 +416,33 @@ object AppCategoryDetector {
         val pkgLower = packageName.lowercase()
         
         return when {
+            // VPN apps
+            pkgLower.contains("vpn") || nameLower.contains("vpn") ||
+            pkgLower.contains("wireguard") || pkgLower.contains("openvpn") ||
+            pkgLower.contains("nordvpn") || pkgLower.contains("expressvpn") ||
+            pkgLower.contains("tunnelbear") || pkgLower.contains("surfshark") -> AppCategory.VPN
+
             // Banking
             pkgLower.contains("bank") || nameLower.contains("bank") ||
-            pkgLower.contains("finance") || nameLower.contains("spořen") -> AppCategory.BANKING
+            pkgLower.contains("finance") || nameLower.contains("spořen") ||
+            pkgLower.contains("moneta") || pkgLower.contains("csob") ||
+            pkgLower.contains("csas") || pkgLower.contains("fio.ib") -> AppCategory.BANKING
             
             // Messaging
             pkgLower.contains("messenger") || pkgLower.contains("chat") ||
             pkgLower.contains("whatsapp") || pkgLower.contains("telegram") ||
-            pkgLower.contains("viber") || nameLower.contains("messenger") -> AppCategory.MESSAGING
+            pkgLower.contains("viber") || pkgLower.contains("signal") ||
+            pkgLower.contains("discord") || nameLower.contains("messenger") -> AppCategory.MESSAGING
             
             // Social
             pkgLower.contains("facebook") || pkgLower.contains("instagram") ||
             pkgLower.contains("twitter") || pkgLower.contains("tiktok") ||
-            pkgLower.contains("snapchat") -> AppCategory.SOCIAL
+            pkgLower.contains("snapchat") || pkgLower.contains("reddit") -> AppCategory.SOCIAL
             
             // Navigation
             pkgLower.contains("maps") || pkgLower.contains("navigation") ||
-            pkgLower.contains("waze") || nameLower.contains("mapy") -> AppCategory.NAVIGATION
+            pkgLower.contains("waze") || nameLower.contains("mapy") ||
+            pkgLower.contains("sygic") -> AppCategory.NAVIGATION
             
             // Camera / Photo
             pkgLower.contains("camera") || pkgLower.contains("photo") ||
@@ -407,46 +450,140 @@ object AppCategoryDetector {
             
             // Fitness / Health
             pkgLower.contains("fitness") || pkgLower.contains("health") ||
-            pkgLower.contains("sport") || nameLower.contains("zdraví") -> AppCategory.FITNESS
+            pkgLower.contains("sport") || nameLower.contains("zdraví") ||
+            pkgLower.contains("strava") || pkgLower.contains("fitbit") -> AppCategory.FITNESS
+            
+            // Browser
+            pkgLower.contains("browser") || pkgLower.contains("chrome") ||
+            pkgLower.contains("firefox") || pkgLower.contains("brave") ||
+            pkgLower.contains("opera") || pkgLower.contains("edge") ||
+            pkgLower.contains("duckduckgo") || pkgLower.contains("webview") -> AppCategory.BROWSER
+            
+            // Phone / Dialer / Contacts
+            pkgLower.contains("dialer") || pkgLower.contains("contacts") ||
+            pkgLower.contains("incallui") || pkgLower.contains("phone") -> AppCategory.PHONE_DIALER
+            
+            // Security
+            pkgLower.contains("security") || pkgLower.contains("antivirus") ||
+            pkgLower.contains("malware") || pkgLower.contains("lookout") ||
+            pkgLower.contains("cybersentinel") -> AppCategory.SECURITY
+            
+            // Launcher
+            pkgLower.contains("launcher") || pkgLower.contains("home") ||
+            nameLower.contains("launcher") -> AppCategory.LAUNCHER
+            
+            // Accessibility tools
+            pkgLower.contains("accessibility") || pkgLower.contains("talkback") ||
+            nameLower.contains("usnadnění") -> AppCategory.ACCESSIBILITY_TOOL
             
             // Games
             pkgLower.contains("game") || nameLower.contains("hra") -> AppCategory.GAME
             
-            // Utilities
+            // Utilities / Simple apps
             pkgLower.contains("calculator") || pkgLower.contains("flashlight") ||
             pkgLower.contains("compass") || pkgLower.contains("qr") ||
-            nameLower.contains("kalkulačka") || nameLower.contains("svítilna") -> AppCategory.UTILITY
+            pkgLower.contains("barcode") || pkgLower.contains("clock") ||
+            pkgLower.contains("alarm") || pkgLower.contains("timer") ||
+            pkgLower.contains("note") || pkgLower.contains("memo") ||
+            pkgLower.contains("todo") || pkgLower.contains("ruler") ||
+            nameLower.contains("kalkulačka") || nameLower.contains("svítilna") ||
+            nameLower.contains("kompas") -> AppCategory.UTILITY
+            
+            // Keyboard / Input
+            pkgLower.contains("keyboard") || pkgLower.contains("inputmethod") ||
+            pkgLower.contains("gboard") || pkgLower.contains("swiftkey") -> AppCategory.KEYBOARD
             
             else -> AppCategory.OTHER
         }
     }
     
+    /**
+     * App categories with expected permissions.
+     * Permissions listed here are NOT alarming for apps in that category.
+     */
     enum class AppCategory(val label: String, val expectedPermissions: Set<String>) {
-        BANKING("Bankovnictví", setOf()),
+        BANKING("Bankovnictví", setOf(
+            "android.permission.CAMERA",  // QR codes, check deposit
+            "android.permission.ACCESS_FINE_LOCATION",  // Branch finder
+            "android.permission.USE_BIOMETRIC"
+        )),
         MESSAGING("Komunikace", setOf(
             "android.permission.CAMERA",
             "android.permission.RECORD_AUDIO",
-            "android.permission.READ_CONTACTS"
+            "android.permission.READ_CONTACTS",
+            "android.permission.WRITE_CONTACTS",
+            "android.permission.ACCESS_FINE_LOCATION",
+            "android.permission.READ_EXTERNAL_STORAGE",
+            "android.permission.WRITE_EXTERNAL_STORAGE"
         )),
         SOCIAL("Sociální sítě", setOf(
             "android.permission.CAMERA",
+            "android.permission.RECORD_AUDIO",
             "android.permission.READ_CONTACTS",
-            "android.permission.ACCESS_FINE_LOCATION"
+            "android.permission.ACCESS_FINE_LOCATION",
+            "android.permission.READ_EXTERNAL_STORAGE",
+            "android.permission.WRITE_EXTERNAL_STORAGE"
         )),
         NAVIGATION("Navigace", setOf(
             "android.permission.ACCESS_FINE_LOCATION",
             "android.permission.ACCESS_COARSE_LOCATION",
-            "android.permission.ACCESS_BACKGROUND_LOCATION"
+            "android.permission.ACCESS_BACKGROUND_LOCATION",
+            "android.permission.RECORD_AUDIO"  // Voice commands
         )),
         CAMERA("Fotografie", setOf(
             "android.permission.CAMERA",
+            "android.permission.RECORD_AUDIO",
             "android.permission.WRITE_EXTERNAL_STORAGE",
-            "android.permission.ACCESS_FINE_LOCATION"
+            "android.permission.READ_EXTERNAL_STORAGE",
+            "android.permission.ACCESS_FINE_LOCATION"  // Geo-tagging
         )),
         FITNESS("Zdraví a fitness", setOf(
             "android.permission.BODY_SENSORS",
             "android.permission.ACTIVITY_RECOGNITION",
+            "android.permission.ACCESS_FINE_LOCATION",
+            "android.permission.ACCESS_BACKGROUND_LOCATION",
+            "android.permission.BLUETOOTH_CONNECT"
+        )),
+        BROWSER("Prohlížeč", setOf(
+            "android.permission.CAMERA",
+            "android.permission.RECORD_AUDIO",
+            "android.permission.ACCESS_FINE_LOCATION",
+            "android.permission.WRITE_EXTERNAL_STORAGE",
+            "android.permission.READ_EXTERNAL_STORAGE"
+        )),
+        PHONE_DIALER("Telefon", setOf(
+            "android.permission.READ_CONTACTS",
+            "android.permission.WRITE_CONTACTS",
+            "android.permission.READ_CALL_LOG",
+            "android.permission.WRITE_CALL_LOG",
+            "android.permission.READ_SMS",
+            "android.permission.SEND_SMS",
+            "android.permission.RECEIVE_SMS",
+            "android.permission.CALL_PHONE",
+            "android.permission.RECORD_AUDIO",
+            "android.permission.CAMERA"
+        )),
+        VPN("VPN", setOf(
+            "android.permission.BIND_VPN_SERVICE"
+        )),
+        SECURITY("Bezpečnost", setOf(
+            "android.permission.CAMERA",
+            "android.permission.ACCESS_FINE_LOCATION",
+            "android.permission.ACCESS_WIFI_STATE",
+            "android.permission.CHANGE_WIFI_STATE",
+            "android.permission.ACCESS_NETWORK_STATE",
+            "android.permission.POST_NOTIFICATIONS"
+        )),
+        LAUNCHER("Launcher", setOf(
+            "android.permission.READ_CONTACTS",
             "android.permission.ACCESS_FINE_LOCATION"
+        )),
+        ACCESSIBILITY_TOOL("Usnadnění", setOf(
+            "android.permission.BIND_ACCESSIBILITY_SERVICE"
+        )),
+        KEYBOARD("Klávesnice", setOf(
+            "android.permission.READ_CONTACTS",
+            "android.permission.VIBRATE"
         )),
         GAME("Hry", setOf()),
         UTILITY("Nástroje", setOf()),
@@ -458,5 +595,16 @@ object AppCategoryDetector {
      */
     fun isPermissionExpected(category: AppCategory, permission: String): Boolean {
         return permission in category.expectedPermissions
+    }
+    
+    /**
+     * Get permissions that are unexpected for the app category.
+     * These are candidates for "unexplained capability" — but still just info, not alarm.
+     */
+    fun getUnexpectedPermissions(
+        category: AppCategory,
+        grantedPermissions: List<String>
+    ): List<String> {
+        return grantedPermissions.filter { it !in category.expectedPermissions }
     }
 }

@@ -35,7 +35,8 @@ class AppSecurityScanner @Inject constructor(
     @ApplicationContext private val context: Context,
     private val trustEngine: TrustEvidenceEngine,
     private val trustRiskModel: TrustRiskModel,
-    private val baselineManager: BaselineManager
+    private val baselineManager: BaselineManager,
+    private val specialAccessInspector: SpecialAccessInspector
 ) {
     
     /**
@@ -156,8 +157,27 @@ class AppSecurityScanner @Inject constructor(
         val size: Long,
         val sha256: String?,
         val isSuspicious: Boolean,
-        val suspicionReason: String?
+        val suspicionReason: String?,
+        /** Classification of suspicious lib type */
+        val suspicionType: NativeLibSuspicionType = NativeLibSuspicionType.UNKNOWN
     )
+
+    /**
+     * Classification of suspicious native library types.
+     * Used to weight the finding — hooking frameworks are more dangerous than crypto libs.
+     */
+    enum class NativeLibSuspicionType(val label: String, val weight: Int) {
+        /** Runtime hooking / injection framework (Frida, Xposed, Substrate) */
+        HOOKING("Hooking framework", 10),
+        /** Packer / obfuscation tool */
+        PACKER("Obfuskace/packer", 7),
+        /** Root / privilege escalation tool */
+        ROOT_TOOL("Root nástroj", 9),
+        /** Crypto miner */
+        CRYPTO_MINER("Crypto miner", 8),
+        /** Generic suspicious pattern */
+        UNKNOWN("Neznámý", 3)
+    }
     
     data class AppSecurityIssue(
         val id: String,
@@ -197,15 +217,50 @@ class AppSecurityScanner @Inject constructor(
         "C3D3E3F3F3F3F3F3F3F3F3F3F3F3F3F3F3F3F3F3"
     )
     
-    // Suspicious native library patterns
+    // Suspicious native library patterns with classification
+    private data class SuspiciousLibPattern(
+        val regex: Regex,
+        val reason: String,
+        val type: NativeLibSuspicionType
+    )
+
     private val suspiciousLibPatterns = listOf(
-        Regex(".*hide.*", RegexOption.IGNORE_CASE),
-        Regex(".*hook.*", RegexOption.IGNORE_CASE),
-        Regex(".*inject.*", RegexOption.IGNORE_CASE),
-        Regex(".*root.*", RegexOption.IGNORE_CASE),
-        Regex(".*frida.*", RegexOption.IGNORE_CASE),
-        Regex(".*xposed.*", RegexOption.IGNORE_CASE),
-        Regex(".*substrate.*", RegexOption.IGNORE_CASE)
+        SuspiciousLibPattern(
+            Regex(".*frida.*", RegexOption.IGNORE_CASE),
+            "Frida hooking framework", NativeLibSuspicionType.HOOKING
+        ),
+        SuspiciousLibPattern(
+            Regex(".*xposed.*", RegexOption.IGNORE_CASE),
+            "Xposed framework", NativeLibSuspicionType.HOOKING
+        ),
+        SuspiciousLibPattern(
+            Regex(".*substrate.*", RegexOption.IGNORE_CASE),
+            "Cydia Substrate", NativeLibSuspicionType.HOOKING
+        ),
+        SuspiciousLibPattern(
+            Regex(".*hook.*", RegexOption.IGNORE_CASE),
+            "Hooking library", NativeLibSuspicionType.HOOKING
+        ),
+        SuspiciousLibPattern(
+            Regex(".*inject.*", RegexOption.IGNORE_CASE),
+            "Code injection library", NativeLibSuspicionType.HOOKING
+        ),
+        SuspiciousLibPattern(
+            Regex(".*root.*", RegexOption.IGNORE_CASE),
+            "Root access tool", NativeLibSuspicionType.ROOT_TOOL
+        ),
+        SuspiciousLibPattern(
+            Regex(".*hide.*", RegexOption.IGNORE_CASE),
+            "Hiding / stealth library", NativeLibSuspicionType.ROOT_TOOL
+        ),
+        SuspiciousLibPattern(
+            Regex(".*pack.*jiagu.*|.*bangcle.*|.*ijiami.*|.*qihoo.*", RegexOption.IGNORE_CASE),
+            "Known packer/protector", NativeLibSuspicionType.PACKER
+        ),
+        SuspiciousLibPattern(
+            Regex(".*coinhive.*|.*cryptonight.*|.*monero.*|.*miner.*", RegexOption.IGNORE_CASE),
+            "Crypto mining library", NativeLibSuspicionType.CRYPTO_MINER
+        )
     )
     
     // Permission categories and risk levels
@@ -358,8 +413,28 @@ class AppSecurityScanner @Inject constructor(
         )
         val trustEvidence = trustEngine.collectEvidence(packageInfo, certFingerprint)
         
-        // ── 2. Baseline comparison (change detection) ──
+        // ── 2. Collect permission + component data for baseline ──
         val installerPkg = trustEvidence.installerInfo.installerPackage
+        val allPermissions = (packageInfo.requestedPermissions ?: emptyArray()).toList()
+        val currentHighRiskPerms = allPermissions.filter { it in BaselineManager.HIGH_RISK_PERMISSIONS }
+        val exportedSurface = BaselineManager.ExportedSurface(
+            exportedActivityCount = componentAnalysis.exportedActivities.size,
+            exportedServiceCount = componentAnalysis.exportedServices.size,
+            exportedReceiverCount = componentAnalysis.exportedReceivers.size,
+            exportedProviderCount = componentAnalysis.exportedProviders.size,
+            unprotectedExportedCount = componentAnalysis.exportedActivities.count { !it.isProtected } +
+                    componentAnalysis.exportedServices.count { !it.isProtected } +
+                    componentAnalysis.exportedReceivers.count { !it.isProtected } +
+                    componentAnalysis.exportedProviders.count { !it.isProtected }
+        )
+        
+        // Detect app category for context-aware evaluation
+        val appCategory = AppCategoryDetector.detectCategory(
+            packageInfo.packageName,
+            scannedApp.appName
+        )
+        
+        // ── 3. Baseline comparison (change detection) ──
         val baselineComparison = baselineManager.compareWithBaseline(
             packageName = packageInfo.packageName,
             currentCertSha256 = certFingerprint,
@@ -367,12 +442,15 @@ class AppSecurityScanner @Inject constructor(
             currentVersionName = scannedApp.versionName,
             isSystemApp = scannedApp.isSystemApp,
             installerPackage = installerPkg,
-            apkPath = scannedApp.apkPath
+            apkPath = scannedApp.apkPath,
+            currentPermissions = allPermissions,
+            currentHighRiskPermissions = currentHighRiskPerms,
+            currentExportedSurface = exportedSurface
         )
         
-        // ── 3. Generate issues + raw findings ──
+        // ── 4. Generate issues + raw findings ──
         
-        // Baseline anomalies → HARD findings
+        // Baseline anomalies → findings
         baselineComparison.anomalies.forEach { anomaly ->
             val (findingType, severity) = when (anomaly.type) {
                 BaselineManager.AnomalyType.CERT_CHANGED -> 
@@ -385,6 +463,27 @@ class AppSecurityScanner @Inject constructor(
                     TrustRiskModel.FindingType.OLD_TARGET_SDK to RiskLevel.LOW // Not really a finding
                 BaselineManager.AnomalyType.PARTITION_CHANGED -> 
                     TrustRiskModel.FindingType.INSTALLER_ANOMALY to RiskLevel.MEDIUM
+                BaselineManager.AnomalyType.PERMISSION_SET_CHANGED ->
+                    TrustRiskModel.FindingType.OVER_PRIVILEGED to RiskLevel.LOW // Informational
+                BaselineManager.AnomalyType.HIGH_RISK_PERMISSION_ADDED ->
+                    TrustRiskModel.FindingType.HIGH_RISK_PERMISSION_ADDED to RiskLevel.HIGH
+                BaselineManager.AnomalyType.EXPORTED_SURFACE_INCREASED ->
+                    TrustRiskModel.FindingType.EXPORTED_SURFACE_INCREASED to RiskLevel.MEDIUM
+                BaselineManager.AnomalyType.VERSION_ROLLBACK -> {
+                    // Context-aware: sideloaded rollback = HARD HIGH, Play Store rollback = SOFT MEDIUM
+                    val isTrustedInstaller = trustEvidence.installerInfo.installerType in setOf(
+                        TrustEvidenceEngine.InstallerType.PLAY_STORE,
+                        TrustEvidenceEngine.InstallerType.SYSTEM_INSTALLER,
+                        TrustEvidenceEngine.InstallerType.SAMSUNG_STORE,
+                        TrustEvidenceEngine.InstallerType.HUAWEI_APPGALLERY,
+                        TrustEvidenceEngine.InstallerType.AMAZON_APPSTORE
+                    )
+                    if (isTrustedInstaller) {
+                        TrustRiskModel.FindingType.VERSION_ROLLBACK_TRUSTED to RiskLevel.MEDIUM
+                    } else {
+                        TrustRiskModel.FindingType.VERSION_ROLLBACK to RiskLevel.HIGH
+                    }
+                }
             }
             
             // Only create issues for significant anomalies
@@ -475,23 +574,26 @@ class AppSecurityScanner @Inject constructor(
             ))
         }
         
-        // Critical permissions (SOFT)
-        permissionAnalysis.dangerousPermissions
-            .filter { it.isGranted && it.riskLevel == RiskLevel.CRITICAL }
-            .forEach { perm ->
-                issues.add(AppSecurityIssue(
-                    id = "perm_critical_${packageInfo.packageName}_${perm.permission.hashCode()}",
-                    title = "Kritické oprávnění: ${perm.shortName}",
-                    description = "${scannedApp.appName} má přístup k ${perm.shortName.lowercase()}.",
-                    impact = perm.description,
-                    category = IssueCategory.PERMISSIONS,
-                    severity = RiskLevel.HIGH,
-                    action = IssueAction.OpenSettings(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, "Odebrat oprávnění")
-                ))
+        // High-risk capability clusters (WEAK_SIGNAL — only alarming in combos or with low trust)
+        val grantedPerms = permissionAnalysis.dangerousPermissions
+            .filter { it.isGranted }
+            .map { it.permission }
+        val activeClusters = TrustRiskModel.CapabilityCluster.entries.filter { it.isActive(grantedPerms) }
+        
+        for (cluster in activeClusters) {
+            // Don't create issues for expected permissions
+            val isExpected = cluster.permissions.all { perm ->
+                AppCategoryDetector.isPermissionExpected(appCategory, perm)
+            }
+            
+            if (!isExpected) {
                 rawFindings.add(TrustRiskModel.RawFinding(
-                    TrustRiskModel.FindingType.CRITICAL_PERMISSION, RiskLevel.HIGH, perm.shortName, perm.description
+                    TrustRiskModel.FindingType.HIGH_RISK_CAPABILITY, RiskLevel.MEDIUM,
+                    cluster.label,
+                    "Aplikace má přístup k: ${cluster.label}"
                 ))
             }
+        }
         
         // Exported components (SOFT)
         if (componentAnalysis.hasExportedRisks) {
@@ -556,45 +658,90 @@ class AppSecurityScanner @Inject constructor(
             ))
         }
         
-        // Installer anomaly for trusted-looking apps (HARD)
-        if (trustEvidence.certMatch.matchType == TrustEvidenceEngine.CertMatchType.DEVELOPER_MATCH &&
-            trustEvidence.installerInfo.installerType == TrustEvidenceEngine.InstallerType.SIDELOADED) {
-            val title = "Neobvyklý zdroj instalace"
-            issues.add(AppSecurityIssue(
-                id = "installer_anomaly_${packageInfo.packageName}",
-                title = title,
-                description = "${scannedApp.appName} od ověřeného vývojáře byla nainstalována mimo obchod.",
-                impact = "U ověřených aplikací je neobvyklé, aby byly instalovány ručně.",
-                category = IssueCategory.SIGNATURE,
-                severity = RiskLevel.MEDIUM,
-                action = IssueAction.OpenPlayStore(packageInfo.packageName, "Přeinstalovat z Play Store")
-            ))
-            rawFindings.add(TrustRiskModel.RawFinding(
-                TrustRiskModel.FindingType.INSTALLER_ANOMALY, RiskLevel.MEDIUM, title, ""
-            ))
+        // Installer anomaly — refined logic:
+        // - DEVELOPER_MATCH + sideloaded → SOFT (cert matches, likely power-user)
+        // - CERT_MISMATCH + sideloaded → HARD (cert doesn't match, possible re-sign)
+        if (trustEvidence.installerInfo.installerType == TrustEvidenceEngine.InstallerType.SIDELOADED) {
+            when (trustEvidence.certMatch.matchType) {
+                TrustEvidenceEngine.CertMatchType.DEVELOPER_MATCH -> {
+                    // Cert matches known developer — power-user install (APKMirror, beta, etc.)
+                    val title = "Ruční instalace ověřené aplikace"
+                    issues.add(AppSecurityIssue(
+                        id = "installer_anomaly_verified_${packageInfo.packageName}",
+                        title = title,
+                        description = "${scannedApp.appName} od ověřeného vývojáře byla nainstalována mimo obchod.",
+                        impact = "Ověřený vývojář, ale instalace mimo oficiální obchod může znamenat starší nebo upravenou verzi.",
+                        category = IssueCategory.SIGNATURE,
+                        severity = RiskLevel.LOW,
+                        action = IssueAction.OpenPlayStore(packageInfo.packageName, "Přeinstalovat z Play Store")
+                    ))
+                    rawFindings.add(TrustRiskModel.RawFinding(
+                        TrustRiskModel.FindingType.INSTALLER_ANOMALY_VERIFIED, RiskLevel.LOW, title, ""
+                    ))
+                }
+                TrustEvidenceEngine.CertMatchType.CERT_MISMATCH -> {
+                    // Cert DOESN'T match — this is genuinely suspicious
+                    val title = "Podezřelý zdroj instalace"
+                    issues.add(AppSecurityIssue(
+                        id = "installer_anomaly_${packageInfo.packageName}",
+                        title = title,
+                        description = "${scannedApp.appName} vypadá jako známá aplikace, ale má neplatný certifikát.",
+                        impact = "Aplikace mohla být přebalena s škodlivým kódem.",
+                        category = IssueCategory.SIGNATURE,
+                        severity = RiskLevel.HIGH,
+                        action = IssueAction.OpenSettings(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, "Zvážit odinstalaci")
+                    ))
+                    rawFindings.add(TrustRiskModel.RawFinding(
+                        TrustRiskModel.FindingType.INSTALLER_ANOMALY, RiskLevel.HIGH, title, ""
+                    ))
+                }
+                else -> {
+                    // UNKNOWN cert + sideloaded — moderate concern
+                    // (APP_MATCH is also fine — individual app verified)
+                    if (trustEvidence.certMatch.matchType == TrustEvidenceEngine.CertMatchType.UNKNOWN) {
+                        val title = "Neznámá sideload instalace"
+                        issues.add(AppSecurityIssue(
+                            id = "installer_anomaly_unknown_${packageInfo.packageName}",
+                            title = title,
+                            description = "${scannedApp.appName} byla nainstalována z neznámého zdroje.",
+                            impact = "Neznámý vývojář s ruční instalací zvyšuje riziko.",
+                            category = IssueCategory.SIGNATURE,
+                            severity = RiskLevel.MEDIUM,
+                            action = IssueAction.OpenPlayStore(packageInfo.packageName, "Zkusit najít v Play Store")
+                        ))
+                        rawFindings.add(TrustRiskModel.RawFinding(
+                            TrustRiskModel.FindingType.INSTALLER_ANOMALY, RiskLevel.MEDIUM, title, ""
+                        ))
+                    }
+                }
+            }
         }
         
-        // ── 4. Produce verdict (Trust + Risk combined) ──
+        // ── 4b. Special access inspection (real enabled state) ──
+        val specialAccessSnapshot = specialAccessInspector.inspectApp(packageInfo.packageName)
+
+        // ── 5. Produce verdict (Trust + Risk combined — 3-axis) ──
         val verdict = trustRiskModel.evaluate(
             packageName = packageInfo.packageName,
             trustEvidence = trustEvidence,
             rawFindings = rawFindings,
-            isSystemApp = scannedApp.isSystemApp
+            isSystemApp = scannedApp.isSystemApp,
+            grantedPermissions = grantedPerms,
+            appCategory = appCategory,
+            isNewApp = baselineComparison.status == BaselineManager.BaselineStatus.NEW
+                    && !baselineComparison.isFirstScan,
+            specialAccessSnapshot = specialAccessSnapshot
         )
         
-        // Overall risk — use verdict's effective risk, mapped to RiskLevel
+        // Overall risk — map 4-state verdict to RiskLevel for backward compat
         val overallRisk = when (verdict.effectiveRisk) {
             TrustRiskModel.EffectiveRisk.CRITICAL -> RiskLevel.CRITICAL
-            TrustRiskModel.EffectiveRisk.ELEVATED -> {
-                // Check if any hard findings elevate this
-                if (rawFindings.any { it.severity == RiskLevel.HIGH }) RiskLevel.HIGH
-                else RiskLevel.MEDIUM
-            }
-            TrustRiskModel.EffectiveRisk.LOW -> RiskLevel.LOW
-            TrustRiskModel.EffectiveRisk.NOMINAL -> RiskLevel.NONE
+            TrustRiskModel.EffectiveRisk.NEEDS_ATTENTION -> RiskLevel.HIGH
+            TrustRiskModel.EffectiveRisk.INFO -> RiskLevel.LOW
+            TrustRiskModel.EffectiveRisk.SAFE -> RiskLevel.NONE
         }
         
-        // ── 5. Update baseline for next scan ──
+        // ── 6. Update baseline for next scan ──
         baselineManager.updateBaseline(
             packageName = packageInfo.packageName,
             certSha256 = certFingerprint,
@@ -602,7 +749,10 @@ class AppSecurityScanner @Inject constructor(
             versionName = scannedApp.versionName,
             isSystemApp = scannedApp.isSystemApp,
             installerPackage = installerPkg,
-            apkPath = scannedApp.apkPath
+            apkPath = scannedApp.apkPath,
+            permissions = allPermissions,
+            highRiskPermissions = currentHighRiskPerms,
+            exportedSurface = exportedSurface
         )
         
         return AppSecurityReport(
@@ -937,28 +1087,18 @@ class AppSecurityScanner @Inject constructor(
                                 architectures.add(parts[1])
                                 val libName = parts.last()
                                 
-                                val isSuspicious = suspiciousLibPatterns.any { 
-                                    it.matches(libName) 
+                                val matchedPattern = suspiciousLibPatterns.firstOrNull { 
+                                    it.regex.matches(libName) 
                                 }
-                                
-                                val suspicionReason = if (isSuspicious) {
-                                    when {
-                                        libName.contains("frida", true) -> "Frida injection framework"
-                                        libName.contains("xposed", true) -> "Xposed framework"
-                                        libName.contains("substrate", true) -> "Substrate hooking"
-                                        libName.contains("hook", true) -> "Hooking library"
-                                        libName.contains("hide", true) -> "Root hiding"
-                                        libName.contains("inject", true) -> "Code injection"
-                                        else -> "Podezřelý název"
-                                    }
-                                } else null
+                                val isSuspicious = matchedPattern != null
                                 
                                 libraries.add(NativeLibInfo(
                                     name = libName,
                                     size = entry.size,
                                     sha256 = null, // Would need to read and hash
                                     isSuspicious = isSuspicious,
-                                    suspicionReason = suspicionReason
+                                    suspicionReason = matchedPattern?.reason,
+                                    suspicionType = matchedPattern?.type ?: NativeLibSuspicionType.UNKNOWN
                                 ))
                             }
                         }
@@ -1020,10 +1160,11 @@ class AppSecurityScanner @Inject constructor(
      * Get summary statistics for dashboard
      */
     fun getScanSummary(reports: List<AppSecurityReport>): ScanSummary {
-        val criticalApps = reports.count { it.overallRisk == RiskLevel.CRITICAL }
-        val highRiskApps = reports.count { it.overallRisk == RiskLevel.HIGH }
-        val mediumRiskApps = reports.count { it.overallRisk == RiskLevel.MEDIUM }
-        val safeApps = reports.count { it.overallRisk == RiskLevel.NONE || it.overallRisk == RiskLevel.LOW }
+        // Use 4-state verdict for primary counts
+        val criticalApps = reports.count { it.verdict.effectiveRisk == TrustRiskModel.EffectiveRisk.CRITICAL }
+        val needsAttentionApps = reports.count { it.verdict.effectiveRisk == TrustRiskModel.EffectiveRisk.NEEDS_ATTENTION }
+        val infoApps = reports.count { it.verdict.effectiveRisk == TrustRiskModel.EffectiveRisk.INFO }
+        val safeApps = reports.count { it.verdict.effectiveRisk == TrustRiskModel.EffectiveRisk.SAFE }
         
         val totalIssues = reports.sumOf { it.issues.size }
         val criticalIssues = reports.sumOf { r -> r.issues.count { it.severity == RiskLevel.CRITICAL } }
@@ -1035,8 +1176,8 @@ class AppSecurityScanner @Inject constructor(
         return ScanSummary(
             totalAppsScanned = reports.size,
             criticalRiskApps = criticalApps,
-            highRiskApps = highRiskApps,
-            mediumRiskApps = mediumRiskApps,
+            highRiskApps = needsAttentionApps,
+            mediumRiskApps = infoApps,
             safeApps = safeApps,
             totalIssues = totalIssues,
             criticalIssues = criticalIssues,
@@ -1057,5 +1198,25 @@ class AppSecurityScanner @Inject constructor(
         val overPrivilegedApps: Int,
         val debugSignedApps: Int,
         val suspiciousNativeApps: Int
-    )
+    ) {
+        /**
+         * Apps security score for the dashboard (0–100).
+         *
+         * Only CRITICAL and NEEDS_ATTENTION apps penalize the score.
+         * INFO and SAFE NEVER reduce the score — this prevents "noise regression"
+         * where having many info-level findings makes the phone look insecure.
+         *
+         * Formula:
+         *  - Start at 100
+         *  - Each CRITICAL: -20 (capped at effective deduction)
+         *  - Each NEEDS_ATTENTION: -5
+         *  - Floor: 0
+         */
+        val appsSecurityScore: Int
+            get() {
+                if (totalAppsScanned == 0) return 100
+                val deduction = (criticalRiskApps * 20) + (highRiskApps * 5)
+                return (100 - deduction).coerceIn(0, 100)
+            }
+    }
 }

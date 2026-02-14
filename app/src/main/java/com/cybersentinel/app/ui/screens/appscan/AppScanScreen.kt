@@ -121,14 +121,17 @@ fun AppScanScreen(
                 else -> {
                     val filteredReports = when (uiState.filter) {
                         AppFilter.ALL -> uiState.reports
-                        AppFilter.CRITICAL -> uiState.reports.filter { it.overallRisk == RiskLevel.CRITICAL }
-                        AppFilter.HIGH_RISK -> uiState.reports.filter { it.overallRisk == RiskLevel.HIGH }
-                        AppFilter.MEDIUM_RISK -> uiState.reports.filter { it.overallRisk == RiskLevel.MEDIUM }
-                        AppFilter.SAFE -> uiState.reports.filter { 
-                            it.overallRisk == RiskLevel.NONE || it.overallRisk == RiskLevel.LOW 
+                        AppFilter.CRITICAL -> uiState.reports.filter { 
+                            it.verdict.effectiveRisk == TrustRiskModel.EffectiveRisk.CRITICAL 
                         }
-                        AppFilter.OVER_PRIVILEGED -> uiState.reports.filter { 
-                            it.permissionAnalysis.isOverPrivileged 
+                        AppFilter.NEEDS_ATTENTION -> uiState.reports.filter { 
+                            it.verdict.effectiveRisk == TrustRiskModel.EffectiveRisk.NEEDS_ATTENTION 
+                        }
+                        AppFilter.INFO -> uiState.reports.filter { 
+                            it.verdict.effectiveRisk == TrustRiskModel.EffectiveRisk.INFO 
+                        }
+                        AppFilter.SAFE -> uiState.reports.filter { 
+                            it.verdict.effectiveRisk == TrustRiskModel.EffectiveRisk.SAFE 
                         }
                     }
                     
@@ -428,10 +431,9 @@ private fun FilterChipRow(
                 when (filter) {
                     AppFilter.ALL -> it.totalAppsScanned
                     AppFilter.CRITICAL -> it.criticalRiskApps
-                    AppFilter.HIGH_RISK -> it.highRiskApps
-                    AppFilter.MEDIUM_RISK -> it.mediumRiskApps
+                    AppFilter.NEEDS_ATTENTION -> it.highRiskApps
+                    AppFilter.INFO -> it.mediumRiskApps
                     AppFilter.SAFE -> it.safeApps
-                    AppFilter.OVER_PRIVILEGED -> it.overPrivilegedApps
                 }
             }
             
@@ -460,8 +462,8 @@ private fun AppReportCard(
     val context = LocalContext.current
     var expanded by remember { mutableStateOf(false) }
     
-    // Use human-readable risk labels
-    val riskLabel = RiskLabels.getLabel(report.overallRisk)
+    // Use 4-state verdict labels
+    val riskLabel = RiskLabels.getVerdictLabel(report.verdict.effectiveRisk)
     val riskColor = Color(riskLabel.color.toInt())
     
     // Use secure trust verification (packageName + SHA-256 cert)
@@ -639,10 +641,10 @@ private fun AppReportCard(
                 // Trust & Verdict info
                 Spacer(Modifier.height(8.dp))
                 val verdictLabel = when (report.verdict.effectiveRisk) {
-                    TrustRiskModel.EffectiveRisk.CRITICAL -> "🔴 Kritické riziko"
-                    TrustRiskModel.EffectiveRisk.ELEVATED -> "🟠 Zvýšené riziko"
-                    TrustRiskModel.EffectiveRisk.LOW -> "🟡 Nízké riziko"
-                    TrustRiskModel.EffectiveRisk.NOMINAL -> "🟢 Nominální"
+                    TrustRiskModel.EffectiveRisk.CRITICAL -> "🔴 Vyžaduje pozornost"
+                    TrustRiskModel.EffectiveRisk.NEEDS_ATTENTION -> "🟠 Ke kontrole"
+                    TrustRiskModel.EffectiveRisk.INFO -> "� Informace"
+                    TrustRiskModel.EffectiveRisk.SAFE -> "🟢 Bezpečná"
                 }
                 val trustLabel = when (trustLevel) {
                     TrustEvidenceEngine.TrustLevel.HIGH -> "Vysoká důvěra"
@@ -733,9 +735,8 @@ private fun formatSize(bytes: Long): String {
 
 enum class AppFilter(val label: String) {
     ALL("Vše"),
-    CRITICAL("Kritické"),
-    HIGH_RISK("Vysoké"),
-    MEDIUM_RISK("Střední"),
-    SAFE("Bezpečné"),
-    OVER_PRIVILEGED("Nadměrná oprávnění")
+    CRITICAL("Vyžaduje pozornost"),
+    NEEDS_ATTENTION("Ke kontrole"),
+    INFO("Informace"),
+    SAFE("Bezpečné")
 }
