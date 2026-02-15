@@ -4,13 +4,14 @@ import org.junit.Assert.*
 import org.junit.Test
 
 /**
- * Unit tests for LlamaCppRuntime — Sprint C2-2 + C2-2.5 + C2-2.6.
+ * Unit tests for LlamaCppRuntime — Sprint C2-2 + C2-2.5 + C2-2.6 + C2-2.7.
  *
  * Note: These tests run in JVM (not on device), so:
  *  - No actual JNI calls (UnsatisfiedLinkError expected)
  *  - Build.SUPPORTED_ABIS is null/empty in JVM → isArm64Device() returns false
  *  - Tests focus on: ABI gating, unloaded state behavior, contract compliance,
  *    cancel support, timeout grace, cooldown, single-flight, JNI output parsing
+ *  - C2-2.7: TTFT validation, token count validation, MAX_TTFT_MS, MAX_TOKEN_COUNT
  *
  * On-device/instrumented tests are in LlmPipelineSmokeTest (androidTest).
  */
@@ -284,5 +285,105 @@ class LlamaCppRuntimeTest {
         val runtime = LlamaCppRuntime.createUnloaded()
         val result = runtime.runInference("test", InferenceConfig.SLOTS_DEFAULT)
         assertTrue("Should mention 'not available'", result.error!!.contains("not available"))
+    }
+
+    // ══════════════════════════════════════════════════════════
+    //  C2-2.7: TTFT validation, token count validation
+    // ══════════════════════════════════════════════════════════
+
+    @Test
+    fun `MAX_TTFT_MS is 120 seconds`() {
+        assertEquals(120_000L, LlamaCppRuntime.MAX_TTFT_MS)
+    }
+
+    @Test
+    fun `MAX_TOKEN_COUNT is 999_999`() {
+        assertEquals(999_999, LlamaCppRuntime.MAX_TOKEN_COUNT)
+    }
+
+    @Test
+    fun `parseJniOutput rejects token count above MAX_TOKEN_COUNT`() {
+        val runtime = LlamaCppRuntime.createUnloaded()
+        // 1_000_000 > 999_999 → fallback to raw text
+        val parsed = runtime.parseJniOutput("1000000|10|{\"data\":true}")
+        assertEquals("1000000|10|{\"data\":true}", parsed.text)
+        assertEquals(0, parsed.tokenCount)
+        assertNull(parsed.ttftMs)
+    }
+
+    @Test
+    fun `parseJniOutput accepts token count at MAX_TOKEN_COUNT`() {
+        val runtime = LlamaCppRuntime.createUnloaded()
+        val parsed = runtime.parseJniOutput("999999|10|{\"data\":true}")
+        assertEquals(999_999, parsed.tokenCount)
+        assertEquals(10L, parsed.ttftMs)
+        assertEquals("{\"data\":true}", parsed.text)
+    }
+
+    @Test
+    fun `parseJniOutput clamps TTFT above MAX_TTFT_MS to null`() {
+        val runtime = LlamaCppRuntime.createUnloaded()
+        // 120001 > 120000 → ttftMs becomes null (measurement error)
+        val parsed = runtime.parseJniOutput("42|120001|{\"severity\":\"HIGH\"}")
+        assertEquals(42, parsed.tokenCount)
+        assertNull("TTFT above max should become null", parsed.ttftMs)
+        assertEquals("{\"severity\":\"HIGH\"}", parsed.text)
+    }
+
+    @Test
+    fun `parseJniOutput accepts TTFT at MAX_TTFT_MS`() {
+        val runtime = LlamaCppRuntime.createUnloaded()
+        val parsed = runtime.parseJniOutput("42|120000|{\"severity\":\"HIGH\"}")
+        assertEquals(42, parsed.tokenCount)
+        assertEquals(120_000L, parsed.ttftMs)
+        assertEquals("{\"severity\":\"HIGH\"}", parsed.text)
+    }
+
+    @Test
+    fun `parseJniOutput fallback returns tokenCount 0`() {
+        val runtime = LlamaCppRuntime.createUnloaded()
+        // Invalid prefix → fallback → tokenCount should be 0 (not a length estimate)
+        val parsed = runtime.parseJniOutput("not_a_number|some text")
+        assertEquals(0, parsed.tokenCount)
+    }
+
+    @Test
+    fun `parseJniOutput empty input returns tokenCount 0`() {
+        val runtime = LlamaCppRuntime.createUnloaded()
+        val parsed = runtime.parseJniOutput("")
+        assertEquals(0, parsed.tokenCount)
+    }
+
+    @Test
+    fun `parseJniOutput normal TTFT is preserved`() {
+        val runtime = LlamaCppRuntime.createUnloaded()
+        val parsed = runtime.parseJniOutput("50|250|text")
+        assertEquals(250L, parsed.ttftMs)
+    }
+
+    @Test
+    fun `parseJniOutput TTFT zero is valid`() {
+        val runtime = LlamaCppRuntime.createUnloaded()
+        val parsed = runtime.parseJniOutput("10|0|text")
+        assertEquals(0L, parsed.ttftMs)
+    }
+
+    @Test
+    fun `InferenceResult failure has null tokensGenerated`() {
+        val result = InferenceResult.failure("error")
+        assertNull("Failure should have null tokensGenerated", result.tokensGenerated)
+    }
+
+    @Test
+    fun `InferenceResult success can have zero tokensGenerated`() {
+        val result = InferenceResult.success("output", tokensGenerated = 0)
+        assertEquals(0, result.tokensGenerated)
+        assertTrue(result.success)
+    }
+
+    @Test
+    fun `InferenceResult success tokensPerSecond null when tokensGenerated null`() {
+        val result = InferenceResult.success("output", totalTimeMs = 100)
+        assertNull("tokensPerSecond should be null when tokensGenerated is null", result.tokensPerSecond)
     }
 }

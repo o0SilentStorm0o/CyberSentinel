@@ -65,10 +65,33 @@ data class LlmBenchmarkResult(
      * If this equals maxNewTokens, the stop condition likely failed for at least one run —
      * the model hit the token limit instead of producing a closed JSON object.
      */
-    val maxGeneratedTokens: Int = 0
+    val maxGeneratedTokens: Int = 0,
+    /**
+     * C2-2.7: Rate of successful runs where tokensGenerated == maxNewTokens.
+     * This means the model hit the hard token limit instead of a proper stop condition
+     * (EOS, JSON close, etc.). A non-zero rate signals stop-condition brittleness.
+     *
+     * Formula: runsWhere(success && tokensGenerated == maxNewTokens) / successfulRuns
+     * Range: 0.0 (all runs stopped cleanly) to 1.0 (all runs hit the limit).
+     */
+    val stopFailureRate: Float = 0f
 ) {
     /** Total benchmark duration in milliseconds */
     val durationMs: Long get() = completedAt - startedAt
+
+    /**
+     * C2-2.7: Production readiness gate.
+     * A model is production-ready when:
+     *  1. stopFailureRate ≤ MAX_STOP_FAILURE_RATE (default 2%) — stop condition works
+     *  2. healthScore ≥ MIN_HEALTH_SCORE (default 70%) — overall quality is acceptable
+     *  3. At least MIN_RUNS runs completed — statistical significance
+     *
+     * This is the primary go/no-go signal for deploying a model to production.
+     */
+    val isProductionReady: Boolean
+        get() = totalRuns >= MIN_PRODUCTION_RUNS &&
+                stopFailureRate <= MAX_STOP_FAILURE_RATE &&
+                healthScore >= MIN_HEALTH_SCORE
 
     /** Overall health score (0.0 - 1.0): weighted combination of key metrics */
     val healthScore: Float
@@ -95,12 +118,28 @@ data class LlmBenchmarkResult(
             if (avgGeneratedTokens > 0f) {
                 appendLine("Tokens: avg ${"%.1f".format(avgGeneratedTokens)}, max $maxGeneratedTokens")
             }
+            if (stopFailureRate > 0f) {
+                appendLine("⚠️ Stop-fail: ${"%.1f".format(stopFailureRate * 100)}%")
+            }
             if (peakNativeHeapBytes > 0) {
                 appendLine("Peak native heap: ${peakNativeHeapBytes / (1024 * 1024)}MB")
             }
+            if (stability.busyCount > 0) {
+                appendLine("ℹ️ Busy (single-flight): ${stability.busyCount}")
+            }
             if (stability.oomCount > 0) appendLine("⚠️ OOM: ${stability.oomCount}")
             if (stability.timeoutCount > 0) appendLine("⚠️ Timeouts: ${stability.timeoutCount}")
+            appendLine("Production ready: ${if (isProductionReady) "✅ YES" else "❌ NO"}")
         }
+
+    companion object {
+        /** C2-2.7: Maximum acceptable stop-failure rate for production (2%) */
+        const val MAX_STOP_FAILURE_RATE = 0.02f
+        /** C2-2.7: Minimum health score for production readiness (70%) */
+        const val MIN_HEALTH_SCORE = 0.70f
+        /** C2-2.7: Minimum number of benchmark runs for production gate */
+        const val MIN_PRODUCTION_RUNS = 10
+    }
 }
 
 // ══════════════════════════════════════════════════════════
@@ -162,6 +201,9 @@ data class LatencyMetrics(
 
 /**
  * Stability counters — how often did inference fail.
+ * C2-2.7: "busy" errors (single-flight contention) are tracked separately and
+ * NOT counted in oomCount/timeoutCount/otherErrorCount. They are expected
+ * operational behavior under concurrent load, not quality failures.
  */
 data class StabilityMetrics(
     /** Total number of inference calls */
@@ -172,31 +214,37 @@ data class StabilityMetrics(
     val oomCount: Int,
     /** Number of timeout failures */
     val timeoutCount: Int,
-    /** Number of other errors */
-    val otherErrorCount: Int
+    /** Number of other errors (excluding busy) */
+    val otherErrorCount: Int,
+    /** C2-2.7: Number of single-flight contention rejections (not errors) */
+    val busyCount: Int = 0
 ) {
     /** Success rate (0.0 - 1.0) */
     val successRate: Float
         get() = if (totalCalls > 0) successCount.toFloat() / totalCalls else 0f
 
-    /** Failure rate (0.0 - 1.0) */
+    /** Failure rate (0.0 - 1.0) — excludes busy (busy is not a failure) */
     val failureRate: Float get() = 1f - successRate
 
+    /** Real error count (excludes busy) */
+    val realErrorCount: Int get() = oomCount + timeoutCount + otherErrorCount
+
     companion object {
-        val EMPTY = StabilityMetrics(0, 0, 0, 0, 0)
+        val EMPTY = StabilityMetrics(0, 0, 0, 0, 0, 0)
 
         fun fromResults(results: List<InferenceResult>): StabilityMetrics {
-            var oom = 0; var timeout = 0; var other = 0; var success = 0
+            var oom = 0; var timeout = 0; var other = 0; var success = 0; var busy = 0
             for (r in results) {
                 if (r.success) { success++; continue }
                 val err = r.error?.lowercase() ?: ""
                 when {
+                    err.contains("busy") -> busy++
                     err.contains("oom") || err.contains("out of memory") -> oom++
                     err.contains("timeout") -> timeout++
                     else -> other++
                 }
             }
-            return StabilityMetrics(results.size, success, oom, timeout, other)
+            return StabilityMetrics(results.size, success, oom, timeout, other, busy)
         }
     }
 }

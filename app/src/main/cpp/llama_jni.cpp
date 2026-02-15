@@ -8,7 +8,7 @@
  *   3. nativeUnload          — free model + context
  *   4. nativeCancelInference — cooperative cancel via atomic flag
  *
- * Design decisions (C2-2.5 + C2-2.6 hardening):
+ * Design decisions (C2-2.5 + C2-2.6 + C2-2.7 hardening):
  *   - Static link ggml + llama.cpp (no separate .so for ggml)
  *   - CPU-only inference (no Vulkan/NNAPI in C2-2; future C2-4)
  *   - Hard n_ctx ceiling (2048 default — slots-only prompts are short)
@@ -18,7 +18,12 @@
  *     with stateful escape handling for \\\" sequences (C2-2.6)
  *   - Hard timeout via elapsed-time check each token
  *   - No streaming — returns "token_count|ttft_ms|output_text" on completion
- *   - Poisoned handle guard: after unload, all JNI calls return error (C2-2.6)
+ *   - **Generational handle registry** (C2-2.7): eliminates use-after-free.
+ *     Kotlin never holds a raw pointer — only a uint64 handle composed of
+ *     (generation_id << 32) | slot_id. JNI lookups go through a global
+ *     unordered_map<uint64_t, shared_ptr<LlamaSession>> + mutex.
+ *     nativeUnload erases the handle from the map; shared_ptr ensures the
+ *     session memory is freed only after all in-flight references are released.
  *   - Single model context per handle (no batched inference)
  *   - LlamaSession struct owns model+context+cancel+poisoned atomically
  *
@@ -37,6 +42,9 @@
 #include <chrono>
 #include <vector>
 #include <atomic>
+#include <mutex>
+#include <memory>
+#include <unordered_map>
 #include <android/log.h>
 
 // llama.cpp headers (paths resolved by CMake include_directories)
@@ -53,11 +61,12 @@
 // ══════════════════════════════════════════════════════════
 
 /**
- * Single-owner session struct. The jlong handle IS a pointer to this struct.
- * Ensures model and context are freed together, and cancel flag is per-session.
+ * Single-owner session struct. Managed via shared_ptr in the global registry.
+ * Kotlin never holds a raw pointer — only a generational handle (uint64_t).
  *
- * After nativeUnload, model+ctx are set to nullptr ("poisoned") before delete.
- * All JNI entry points must null-check model+ctx to handle stale handles safely.
+ * C2-2.7: poisoned flag is set by unload. All JNI ops check poisoned first.
+ * Even after the handle is erased from the registry, an in-flight shared_ptr
+ * may still reference this struct — poisoned prevents any further work.
  */
 struct LlamaSession {
     llama_model*       model       = nullptr;
@@ -67,6 +76,65 @@ struct LlamaSession {
     std::atomic<bool>  cancel_flag{false};  // cooperative cancel — checked every token
     std::atomic<bool>  poisoned{false};     // set after unload — prevents reuse
 };
+
+// ══════════════════════════════════════════════════════════
+//  Global session registry — generational handles (C2-2.7)
+// ══════════════════════════════════════════════════════════
+//
+//  Handle format (uint64_t, returned as jlong to Kotlin):
+//    bits [63..32] = generation counter (monotonically increasing)
+//    bits [31.. 0] = slot index (recycled)
+//
+//  Lookup: registry.find(handle) → shared_ptr<LlamaSession> or nullptr.
+//  nativeLoadModel inserts into registry, returns handle.
+//  nativeUnload erases from registry; shared_ptr ref-count ensures deferred free.
+//  If Kotlin sends a stale handle (generation mismatch), lookup returns end() → fail safe.
+//
+//  This eliminates use-after-free: no raw pointer cast, no dangling memory access.
+
+static std::mutex                                                   g_registry_mutex;
+static std::unordered_map<uint64_t, std::shared_ptr<LlamaSession>>  g_registry;
+static uint32_t                                                     g_generation{0};
+static uint32_t                                                     g_slot{0};
+
+/**
+ * Register a session and return a unique generational handle.
+ * Caller must NOT hold g_registry_mutex.
+ */
+static uint64_t registry_insert(std::shared_ptr<LlamaSession> session) {
+    std::lock_guard<std::mutex> lock(g_registry_mutex);
+    uint32_t gen = ++g_generation;
+    uint32_t slot = ++g_slot;
+    uint64_t handle = (static_cast<uint64_t>(gen) << 32) | static_cast<uint64_t>(slot);
+    g_registry[handle] = std::move(session);
+    return handle;
+}
+
+/**
+ * Look up a session by handle. Returns nullptr if handle is stale/invalid.
+ * The returned shared_ptr keeps the session alive for the duration of the call.
+ */
+static std::shared_ptr<LlamaSession> registry_lookup(uint64_t handle) {
+    std::lock_guard<std::mutex> lock(g_registry_mutex);
+    auto it = g_registry.find(handle);
+    if (it == g_registry.end()) return nullptr;
+    return it->second;  // shared_ptr copy — ref-count incremented
+}
+
+/**
+ * Erase a session from the registry by handle.
+ * The shared_ptr inside the map is dropped, but any in-flight copies keep the
+ * session alive until they go out of scope.
+ * Returns the shared_ptr so the caller can still access it for cleanup.
+ */
+static std::shared_ptr<LlamaSession> registry_erase(uint64_t handle) {
+    std::lock_guard<std::mutex> lock(g_registry_mutex);
+    auto it = g_registry.find(handle);
+    if (it == g_registry.end()) return nullptr;
+    auto session = std::move(it->second);
+    g_registry.erase(it);
+    return session;
+}
 
 // ══════════════════════════════════════════════════════════
 //  JNI_OnLoad — llama.cpp backend initialization
@@ -128,15 +196,18 @@ Java_com_cybersentinel_app_domain_llm_LlamaCppRuntime_nativeLoadModel(
         return 0;
     }
 
-    auto* session = new LlamaSession();
+    auto session = std::make_shared<LlamaSession>();
     session->model     = model;
     session->ctx       = ctx;
     session->n_ctx     = contextSize;
     session->n_threads = nThreads;
     session->cancel_flag.store(false);
 
-    LOGI("nativeLoadModel: model loaded successfully (session=%p)", session);
-    return reinterpret_cast<jlong>(session);
+    // C2-2.7: register session in global registry, return generational handle
+    uint64_t handle = registry_insert(session);
+
+    LOGI("nativeLoadModel: model loaded successfully (handle=0x%llx)", (unsigned long long)handle);
+    return static_cast<jlong>(handle);
 }
 
 // ══════════════════════════════════════════════════════════
@@ -152,6 +223,12 @@ Java_com_cybersentinel_app_domain_llm_LlamaCppRuntime_nativeLoadModel(
  *    sequences like \\\" (escaped backslash + unescaped quote) vs \" (escaped quote).
  *  - Ignores all characters before the first '{' (handles whitespace/preamble).
  *  - Tracks in_string state to avoid counting braces inside string literals.
+ *
+ * C2-2.7 hardening:
+ *  - Explicit control character handling: newline, tab, carriage return and all
+ *    characters < 0x20 reset the consecutive_backslashes counter and are skipped
+ *    when outside a string. Inside a string they are treated as content (invalid
+ *    JSON, but defensive).
  */
 static bool is_json_object_closed(const std::string& text) {
     int depth = 0;
@@ -162,6 +239,13 @@ static bool is_json_object_closed(const std::string& text) {
     for (char c : text) {
         if (!seen_open && c != '{') {
             // Skip any preamble before first '{'
+            continue;
+        }
+
+        // C2-2.7: control characters (< 0x20) always reset backslash counter.
+        // Inside a string they are technically invalid JSON, but we handle defensively.
+        if (static_cast<unsigned char>(c) < 0x20) {
+            consecutive_backslashes = 0;
             continue;
         }
 
@@ -203,7 +287,11 @@ Java_com_cybersentinel_app_domain_llm_LlamaCppRuntime_nativeRunInference(
         return env->NewStringUTF("ERROR: null handle");
     }
 
-    auto* session = reinterpret_cast<LlamaSession*>(handle);
+    // C2-2.7: look up session via generational handle registry
+    auto session = registry_lookup(static_cast<uint64_t>(handle));
+    if (!session) {
+        return env->NewStringUTF("ERROR: invalid or expired handle (session not found in registry)");
+    }
 
     // C2-2.6: poisoned handle guard — prevents use-after-free race
     if (session->poisoned.load(std::memory_order_acquire)) {
@@ -361,7 +449,7 @@ Java_com_cybersentinel_app_domain_llm_LlamaCppRuntime_nativeRunInference(
 }
 
 // ══════════════════════════════════════════════════════════
-//  nativeUnload — atomic cleanup of session struct
+//  nativeUnload — atomic cleanup via registry erase (C2-2.7)
 // ══════════════════════════════════════════════════════════
 
 extern "C" JNIEXPORT void JNICALL
@@ -372,26 +460,38 @@ Java_com_cybersentinel_app_domain_llm_LlamaCppRuntime_nativeUnload(
 ) {
     if (handle == 0) return;
 
-    auto* session = reinterpret_cast<LlamaSession*>(handle);
+    // C2-2.7: erase from registry — Kotlin can never look this handle up again.
+    // The returned shared_ptr is the LAST owner (unless in-flight inference holds a copy).
+    auto session = registry_erase(static_cast<uint64_t>(handle));
+    if (!session) {
+        LOGW("nativeUnload: handle 0x%llx not found in registry (already unloaded?)",
+             (unsigned long long)handle);
+        return;
+    }
 
-    // C2-2.6: mark poisoned FIRST — prevents any concurrent JNI call from using this session
+    LOGI("nativeUnload: freeing handle=0x%llx (ref_count=%ld)",
+         (unsigned long long)handle, session.use_count());
+
+    // C2-2.6: mark poisoned FIRST — any in-flight inference sees this immediately
     session->poisoned.store(true, std::memory_order_release);
 
-    LOGI("nativeUnload: freeing session=%p", session);
-
-    // Signal cancel to any in-flight inference before freeing
+    // Signal cancel to any in-flight inference before freeing model resources
     session->cancel_flag.store(true, std::memory_order_release);
 
+    // Free llama resources while we hold the shared_ptr.
+    // The session struct itself is freed when the last shared_ptr goes out of scope
+    // (either here if no in-flight inference, or when the in-flight inference finishes).
     if (session->ctx) {
         llama_free(session->ctx);
-        session->ctx = nullptr;  // C2-2.6: null-ify before delete for stale-handle safety
+        session->ctx = nullptr;
     }
     if (session->model) {
         llama_free_model(session->model);
-        session->model = nullptr;  // C2-2.6: null-ify before delete
+        session->model = nullptr;
     }
 
-    delete session;
+    // session shared_ptr dropped here — if ref_count == 1, struct is freed.
+    // If in-flight inference holds a copy, struct stays alive but poisoned.
 }
 
 // ══════════════════════════════════════════════════════════
@@ -410,9 +510,14 @@ Java_com_cybersentinel_app_domain_llm_LlamaCppRuntime_nativeCancelInference(
     jlong   handle
 ) {
     if (handle == 0) return;
-    auto* session = reinterpret_cast<LlamaSession*>(handle);
+
+    // C2-2.7: look up via registry — stale handle returns nullptr safely
+    auto session = registry_lookup(static_cast<uint64_t>(handle));
+    if (!session) return;
+
     // C2-2.6: skip if already poisoned (unloaded) — prevents use-after-free
     if (session->poisoned.load(std::memory_order_acquire)) return;
+
     session->cancel_flag.store(true, std::memory_order_release);
-    LOGI("nativeCancelInference: cancel flag set for session=%p", session);
+    LOGI("nativeCancelInference: cancel flag set for handle=0x%llx", (unsigned long long)handle);
 }

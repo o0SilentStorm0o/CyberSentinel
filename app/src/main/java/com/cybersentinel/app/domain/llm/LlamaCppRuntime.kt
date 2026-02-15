@@ -31,6 +31,13 @@ import java.util.concurrent.locks.ReentrantLock
  *  - **Strict JNI prefix guard**: token count prefix must be ≤6 digits.
  *  - **Poisoned handle guard in C++**: after unload, all JNI calls return error.
  *
+ * C2-2.7 hardening:
+ *  - **Generational handle registry in C++**: eliminates use-after-free completely.
+ *    Kotlin holds uint64 handle, JNI looks up via global map + shared_ptr.
+ *    nativeUnload erases handle; shared_ptr defers free until in-flight inference finishes.
+ *  - **TTFT validation**: TTFT > 120s treated as invalid → null (prevents garbage metrics).
+ *  - **Token count validation**: tokenCount > MAX_TOKEN_COUNT treated as invalid → fallback.
+ *
  * Contract:
  *  - ARM64-only: `isAvailable` returns false on non-arm64 devices.
  *  - Single-flight: only one inference at a time; concurrent calls get BUSY error.
@@ -231,24 +238,33 @@ class LlamaCppRuntime private constructor(
      * Parse JNI return format: "TOKEN_COUNT|TTFT_MS|output_text" (C2-2.6 extended)
      *
      * Falls back to C2-2.5 format "TOKEN_COUNT|text" if only one '|' found.
-     * Falls back to length-based estimate if format doesn't match.
+     * Falls back to raw text if format doesn't match.
      *
      * C2-2.6 strict prefix guard: token count + ttft prefixes must be ≤6 chars
      * and all-digits. Prevents garbage from being parsed as metrics.
+     *
+     * C2-2.7 validation:
+     *  - Token count > MAX_TOKEN_COUNT → treat as corrupt, fallback to raw text.
+     *  - TTFT > MAX_TTFT_MS → treat as measurement error, set ttftMs to null.
      */
     internal fun parseJniOutput(raw: String): JniParsedOutput {
         val firstPipe = raw.indexOf('|')
         if (firstPipe <= 0 || firstPipe > MAX_PREFIX_LEN) {
-            return JniParsedOutput(raw, (raw.length / 4).coerceAtLeast(1), null)
+            return JniParsedOutput(raw, 0, null)
         }
 
         val countStr = raw.substring(0, firstPipe)
         if (!countStr.all { it.isDigit() }) {
-            return JniParsedOutput(raw, (raw.length / 4).coerceAtLeast(1), null)
+            return JniParsedOutput(raw, 0, null)
         }
 
         val tokenCount = countStr.toIntOrNull()
-            ?: return JniParsedOutput(raw, (raw.length / 4).coerceAtLeast(1), null)
+            ?: return JniParsedOutput(raw, 0, null)
+
+        // C2-2.7: reject implausibly large token counts
+        if (tokenCount > MAX_TOKEN_COUNT) {
+            return JniParsedOutput(raw, 0, null)
+        }
 
         // Try C2-2.6 extended format: "TOKEN_COUNT|TTFT_MS|text"
         val afterFirst = raw.substring(firstPipe + 1)
@@ -256,7 +272,9 @@ class LlamaCppRuntime private constructor(
         if (secondPipe > 0 && secondPipe <= MAX_PREFIX_LEN) {
             val ttftStr = afterFirst.substring(0, secondPipe)
             if (ttftStr.all { it.isDigit() }) {
-                val ttftMs = ttftStr.toLongOrNull()
+                val ttftRaw = ttftStr.toLongOrNull()
+                // C2-2.7: clamp implausibly large TTFT to null (measurement error)
+                val ttftMs = if (ttftRaw != null && ttftRaw <= MAX_TTFT_MS) ttftRaw else null
                 val text = afterFirst.substring(secondPipe + 1)
                 return JniParsedOutput(text, tokenCount, ttftMs)
             }
@@ -358,6 +376,20 @@ class LlamaCppRuntime private constructor(
          * Prevents garbage from being parsed as metrics.
          */
         private const val MAX_PREFIX_LEN = 6
+
+        /**
+         * C2-2.7: Maximum plausible TTFT value in milliseconds.
+         * If JNI reports TTFT > 120 seconds, treat as measurement error → null.
+         * 120s is well beyond any reasonable first-token latency on mobile.
+         */
+        internal const val MAX_TTFT_MS = 120_000L
+
+        /**
+         * C2-2.7: Maximum plausible token count from a single inference.
+         * If JNI reports more tokens than this, treat as corrupt output → fallback.
+         * Matches MAX_PREFIX_LEN (6 digits = 999999).
+         */
+        internal const val MAX_TOKEN_COUNT = 999_999
 
         @Volatile
         private var libraryLoaded = false

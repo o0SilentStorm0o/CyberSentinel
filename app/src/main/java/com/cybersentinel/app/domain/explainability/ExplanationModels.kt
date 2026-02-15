@@ -72,7 +72,14 @@ data class ExplanationAnswer(
     val confidence: Double,
     val safeLanguageFlags: Set<SafeLanguageFlag> = emptySet(),
     val engineSource: EngineSource = EngineSource.TEMPLATE,
-    val policyViolationsFound: Int = 0
+    val policyViolationsFound: Int = 0,
+    /**
+     * C2-2.7: True when this answer is a template fallback triggered by LLM "busy" (single-flight).
+     * This is NOT an LLM failure — it means another inference was already running.
+     * UX should present this as "explanation is being generated, using fast response"
+     * rather than an error. Stability metrics should NOT count this as an LLM error.
+     */
+    val isBusyFallback: Boolean = false
 ) {
     /** True if this explanation has actionable steps beyond just monitoring */
     val hasActionableSteps: Boolean

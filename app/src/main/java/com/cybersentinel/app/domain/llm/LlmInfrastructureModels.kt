@@ -174,7 +174,17 @@ data class InferenceResult(
     val timeToFirstTokenMs: Long? = null,
     /** Total inference time in milliseconds */
     val totalTimeMs: Long? = null,
-    /** Number of tokens generated */
+    /**
+     * Number of tokens generated.
+     *
+     * Three-state semantics (C2-2.7):
+     * - `null`  — inference never ran or failed before generating any output.
+     * - `0`     — inference ran but produced no usable tokens (e.g. parse fallback).
+     * - `> 0`   — actual token count reported by the runtime.
+     *
+     * Callers (e.g. [LlmSelfTestRunner]) MUST use `?.let` / null-check
+     * to exclude failures from token-count aggregations.
+     */
     val tokensGenerated: Int? = null,
     /** Tokens per second (throughput) */
     val tokensPerSecond: Float? = null

@@ -7,12 +7,13 @@ import org.junit.Before
 import org.junit.Test
 
 /**
- * Unit tests for LlmSelfTestRunner + LlmBenchmarkMetrics — Sprint C2-3 + C2-2.5 + C2-2.6.
+ * Unit tests for LlmSelfTestRunner + LlmBenchmarkMetrics — Sprint C2-3 + C2-2.5 + C2-2.6 + C2-2.7.
  *
  * Uses FakeLlmRuntime for deterministic, fast benchmarking.
  * Tests verify: metric computation, fixture generation, pipeline coverage,
  * failure mode handling, smoke test compatibility, p99 latency, heap tracking,
- * token generation stats (avgGeneratedTokens, maxGeneratedTokens).
+ * token generation stats (avgGeneratedTokens, maxGeneratedTokens),
+ * C2-2.7: stopFailureRate computation, isProductionReady with FakeLlmRuntime.
  */
 class LlmSelfTestRunnerTest {
 
@@ -474,5 +475,52 @@ class LlmSelfTestRunnerTest {
         if (result.avgGeneratedTokens > 0f) {
             assertTrue("Summary should mention Tokens", result.summary.contains("Tokens"))
         }
+    }
+
+    // ══════════════════════════════════════════════════════════
+    //  C2-2.7: stopFailureRate + isProductionReady
+    // ══════════════════════════════════════════════════════════
+
+    @Test
+    fun `benchmark stopFailureRate is zero with FakeLlmRuntime`() {
+        // FakeLlmRuntime generates ~(length/4) tokens which is far below maxNewTokens (160)
+        // So stop-failure rate should be 0 (no run hits the token limit)
+        val result = runner.runBenchmark(runs = 10)
+        assertEquals("FakeLlmRuntime should have 0 stop-fail", 0f, result.stopFailureRate, 0.001f)
+    }
+
+    @Test
+    fun `benchmark isProductionReady with 20 FakeLlmRuntime runs`() {
+        val result = runner.runBenchmark(runs = 20)
+        // 20 runs, 0% stop-fail, high health → should be production ready
+        assertTrue("FakeLlmRuntime with 20 runs should be production ready", result.isProductionReady)
+    }
+
+    @Test
+    fun `benchmark isProductionReady false with error mode`() {
+        runtime.setErrorMode(true)
+        val result = runner.runBenchmark(runs = 20)
+        // 0% success → low health → not production ready
+        assertFalse("Error mode should not be production ready", result.isProductionReady)
+    }
+
+    @Test
+    fun `benchmark isProductionReady false with too few runs`() {
+        val result = runner.runBenchmark(runs = 5)
+        // 5 < MIN_PRODUCTION_RUNS (10) → not ready regardless of quality
+        assertFalse("5 runs should not be production ready", result.isProductionReady)
+    }
+
+    @Test
+    fun `benchmark summary contains production ready indicator`() {
+        val result = runner.runBenchmark(runs = 20)
+        assertTrue("Summary should mention 'Production ready'",
+            result.summary.contains("Production ready"))
+    }
+
+    @Test
+    fun `benchmark stability busyCount is zero with FakeLlmRuntime`() {
+        val result = runner.runBenchmark(runs = 10)
+        assertEquals("No busy errors expected", 0, result.stability.busyCount)
     }
 }

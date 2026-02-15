@@ -4,10 +4,11 @@ import org.junit.Assert.*
 import org.junit.Test
 
 /**
- * Unit tests for LlmBenchmarkMetrics data classes — C2-2.5.
+ * Unit tests for LlmBenchmarkMetrics data classes — C2-2.5 + C2-2.7.
  *
  * Verifies: computed properties, edge cases, companion object factories.
  * C2-2.5: LatencyMetrics now includes p99Ms, LlmBenchmarkResult includes peakNativeHeapBytes.
+ * C2-2.7: StabilityMetrics.busyCount, stopFailureRate, isProductionReady gate.
  */
 class LlmBenchmarkMetricsTest {
 
@@ -300,5 +301,247 @@ class LlmBenchmarkMetricsTest {
             completedAt = 0
         )
         assertEquals(0L, result.peakNativeHeapBytes)
+    }
+
+    // ══════════════════════════════════════════════════════════
+    //  C2-2.7: StabilityMetrics.busyCount
+    // ══════════════════════════════════════════════════════════
+
+    @Test
+    fun `StabilityMetrics EMPTY has busyCount zero`() {
+        assertEquals(0, StabilityMetrics.EMPTY.busyCount)
+    }
+
+    @Test
+    fun `StabilityMetrics fromResults detects busy keyword`() {
+        val results = listOf(
+            InferenceResult.failure("Inference busy (single-flight)"),
+            InferenceResult.success("ok")
+        )
+        val m = StabilityMetrics.fromResults(results)
+        assertEquals(1, m.busyCount)
+        assertEquals(1, m.successCount)
+        // busy should NOT be in oom/timeout/other
+        assertEquals(0, m.oomCount)
+        assertEquals(0, m.timeoutCount)
+        assertEquals(0, m.otherErrorCount)
+    }
+
+    @Test
+    fun `StabilityMetrics busyCount not counted as error`() {
+        val results = listOf(
+            InferenceResult.failure("busy"),
+            InferenceResult.failure("busy"),
+            InferenceResult.success("ok")
+        )
+        val m = StabilityMetrics.fromResults(results)
+        assertEquals(2, m.busyCount)
+        assertEquals(0, m.realErrorCount)
+    }
+
+    @Test
+    fun `StabilityMetrics realErrorCount excludes busy`() {
+        val results = listOf(
+            InferenceResult.failure("OOM"),
+            InferenceResult.failure("Timeout"),
+            InferenceResult.failure("busy"),
+            InferenceResult.failure("unknown error")
+        )
+        val m = StabilityMetrics.fromResults(results)
+        assertEquals(1, m.busyCount)
+        assertEquals(3, m.realErrorCount)  // oom + timeout + other
+        assertEquals(1, m.oomCount)
+        assertEquals(1, m.timeoutCount)
+        assertEquals(1, m.otherErrorCount)
+    }
+
+    @Test
+    fun `StabilityMetrics busy detection is case insensitive`() {
+        val results = listOf(
+            InferenceResult.failure("BUSY runtime")
+        )
+        val m = StabilityMetrics.fromResults(results)
+        assertEquals(1, m.busyCount)
+    }
+
+    // ══════════════════════════════════════════════════════════
+    //  C2-2.7: stopFailureRate + isProductionReady
+    // ══════════════════════════════════════════════════════════
+
+    @Test
+    fun `stopFailureRate default is zero`() {
+        val result = LlmBenchmarkResult(
+            modelId = "test",
+            modelVersion = "1.0",
+            runtimeId = "fake",
+            totalRuns = 0,
+            latency = LatencyMetrics.EMPTY,
+            stability = StabilityMetrics.EMPTY,
+            quality = QualityMetrics.EMPTY,
+            pipeline = PipelineMetrics.EMPTY,
+            inferenceConfig = InferenceConfig.SLOTS_DEFAULT,
+            startedAt = 0,
+            completedAt = 0
+        )
+        assertEquals(0f, result.stopFailureRate, 0.001f)
+    }
+
+    @Test
+    fun `isProductionReady true for good benchmark`() {
+        val result = LlmBenchmarkResult(
+            modelId = "test",
+            modelVersion = "1.0",
+            runtimeId = "fake",
+            totalRuns = 20,
+            latency = LatencyMetrics(100, 50, 200, 100, 180, 190, 30, 10f),
+            stability = StabilityMetrics(20, 20, 0, 0, 0),
+            quality = QualityMetrics(0.9f, 0.9f, 0, 0.8, 0, 0),
+            pipeline = PipelineMetrics(1f, 1f, 0.9f, 0.1f, 0.1f),
+            inferenceConfig = InferenceConfig.SLOTS_DEFAULT,
+            startedAt = 1000,
+            completedAt = 2000,
+            stopFailureRate = 0.01f  // 1% < 2% threshold
+        )
+        assertTrue("Should be production ready", result.isProductionReady)
+    }
+
+    @Test
+    fun `isProductionReady false when too few runs`() {
+        val result = LlmBenchmarkResult(
+            modelId = "test",
+            modelVersion = "1.0",
+            runtimeId = "fake",
+            totalRuns = 5,  // < MIN_PRODUCTION_RUNS (10)
+            latency = LatencyMetrics(100, 50, 200, 100, 180, 190, 30, 10f),
+            stability = StabilityMetrics(5, 5, 0, 0, 0),
+            quality = QualityMetrics(0.9f, 0.9f, 0, 0.8, 0, 0),
+            pipeline = PipelineMetrics(1f, 1f, 0.9f, 0.1f, 0.1f),
+            inferenceConfig = InferenceConfig.SLOTS_DEFAULT,
+            startedAt = 0,
+            completedAt = 1000,
+            stopFailureRate = 0f
+        )
+        assertFalse("Should NOT be production ready with < 10 runs", result.isProductionReady)
+    }
+
+    @Test
+    fun `isProductionReady false when stopFailureRate too high`() {
+        val result = LlmBenchmarkResult(
+            modelId = "test",
+            modelVersion = "1.0",
+            runtimeId = "fake",
+            totalRuns = 20,
+            latency = LatencyMetrics(100, 50, 200, 100, 180, 190, 30, 10f),
+            stability = StabilityMetrics(20, 20, 0, 0, 0),
+            quality = QualityMetrics(0.9f, 0.9f, 0, 0.8, 0, 0),
+            pipeline = PipelineMetrics(1f, 1f, 0.9f, 0.1f, 0.1f),
+            inferenceConfig = InferenceConfig.SLOTS_DEFAULT,
+            startedAt = 0,
+            completedAt = 1000,
+            stopFailureRate = 0.05f  // 5% > 2% threshold
+        )
+        assertFalse("Should NOT be ready with 5% stop-fail", result.isProductionReady)
+    }
+
+    @Test
+    fun `isProductionReady false when healthScore too low`() {
+        val result = LlmBenchmarkResult(
+            modelId = "test",
+            modelVersion = "1.0",
+            runtimeId = "fake",
+            totalRuns = 20,
+            latency = LatencyMetrics.EMPTY,
+            stability = StabilityMetrics(20, 5, 5, 5, 5),  // 25% success → low healthScore
+            quality = QualityMetrics(0.1f, 0.1f, 10, 0.1, 0, 0),
+            pipeline = PipelineMetrics(0.25f, 0.1f, 0.1f, 0f, 0.8f),
+            inferenceConfig = InferenceConfig.SLOTS_DEFAULT,
+            startedAt = 0,
+            completedAt = 1000,
+            stopFailureRate = 0f
+        )
+        assertFalse("Should NOT be ready with low health", result.isProductionReady)
+        assertTrue("healthScore should be < MIN_HEALTH_SCORE",
+            result.healthScore < LlmBenchmarkResult.MIN_HEALTH_SCORE)
+    }
+
+    @Test
+    fun `companion constants have expected values`() {
+        assertEquals(0.02f, LlmBenchmarkResult.MAX_STOP_FAILURE_RATE, 0.0001f)
+        assertEquals(0.70f, LlmBenchmarkResult.MIN_HEALTH_SCORE, 0.0001f)
+        assertEquals(10, LlmBenchmarkResult.MIN_PRODUCTION_RUNS)
+    }
+
+    @Test
+    fun `summary contains production ready YES for good result`() {
+        val result = LlmBenchmarkResult(
+            modelId = "prod-test",
+            modelVersion = "1.0",
+            runtimeId = "fake",
+            totalRuns = 20,
+            latency = LatencyMetrics(100, 50, 200, 100, 180, 190, 30, 10f),
+            stability = StabilityMetrics(20, 20, 0, 0, 0),
+            quality = QualityMetrics(0.9f, 0.9f, 0, 0.8, 0, 0),
+            pipeline = PipelineMetrics(1f, 1f, 0.9f, 0.1f, 0.1f),
+            inferenceConfig = InferenceConfig.SLOTS_DEFAULT,
+            startedAt = 0,
+            completedAt = 1000,
+            stopFailureRate = 0f
+        )
+        assertTrue("Summary should contain YES", result.summary.contains("YES"))
+    }
+
+    @Test
+    fun `summary contains production ready NO for bad result`() {
+        val result = LlmBenchmarkResult(
+            modelId = "test",
+            modelVersion = "1.0",
+            runtimeId = "fake",
+            totalRuns = 0,
+            latency = LatencyMetrics.EMPTY,
+            stability = StabilityMetrics.EMPTY,
+            quality = QualityMetrics.EMPTY,
+            pipeline = PipelineMetrics.EMPTY,
+            inferenceConfig = InferenceConfig.SLOTS_DEFAULT,
+            startedAt = 0,
+            completedAt = 0
+        )
+        assertTrue("Summary should contain NO", result.summary.contains("NO"))
+    }
+
+    @Test
+    fun `summary contains stop-fail when rate positive`() {
+        val result = LlmBenchmarkResult(
+            modelId = "test",
+            modelVersion = "1.0",
+            runtimeId = "fake",
+            totalRuns = 10,
+            latency = LatencyMetrics.EMPTY,
+            stability = StabilityMetrics(10, 10, 0, 0, 0),
+            quality = QualityMetrics.EMPTY,
+            pipeline = PipelineMetrics.EMPTY,
+            inferenceConfig = InferenceConfig.SLOTS_DEFAULT,
+            startedAt = 0,
+            completedAt = 0,
+            stopFailureRate = 0.10f
+        )
+        assertTrue("Summary should mention Stop-fail", result.summary.contains("Stop-fail"))
+    }
+
+    @Test
+    fun `summary contains busy count when positive`() {
+        val result = LlmBenchmarkResult(
+            modelId = "test",
+            modelVersion = "1.0",
+            runtimeId = "fake",
+            totalRuns = 10,
+            latency = LatencyMetrics.EMPTY,
+            stability = StabilityMetrics(10, 8, 0, 0, 0, busyCount = 2),
+            quality = QualityMetrics.EMPTY,
+            pipeline = PipelineMetrics.EMPTY,
+            inferenceConfig = InferenceConfig.SLOTS_DEFAULT,
+            startedAt = 0,
+            completedAt = 0
+        )
+        assertTrue("Summary should mention Busy", result.summary.contains("Busy"))
     }
 }

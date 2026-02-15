@@ -68,7 +68,10 @@ class LocalLlmExplanationEngine(
         }
 
         if (!inferenceResult.success) {
-            return fallbackWithAttribution(request, "Inference failed: ${inferenceResult.error}")
+            // C2-2.7: distinguish "busy" (single-flight contention) from real LLM errors.
+            // Busy is NOT an error — it means another inference is running.
+            val isBusy = inferenceResult.error?.contains("busy", ignoreCase = true) == true
+            return fallbackWithAttribution(request, "Inference failed: ${inferenceResult.error}", isBusy)
         }
 
         // Step 4: Parse slots from raw output
@@ -103,15 +106,18 @@ class LocalLlmExplanationEngine(
      *
      * @param request The original request
      * @param reason Why the LLM path failed (for logging, NOT shown to user)
+     * @param isBusy C2-2.7: true if fallback is due to single-flight contention (not an error)
      */
     private fun fallbackWithAttribution(
         request: ExplanationRequest,
-        @Suppress("UNUSED_PARAMETER") reason: String
+        @Suppress("UNUSED_PARAMETER") reason: String,
+        isBusy: Boolean = false
     ): ExplanationAnswer {
         // NOTE: Do NOT log `reason` in release builds (may contain prompt fragments).
         // Future: Write to internal diagnostics buffer only.
         return templateEngine.explain(request).copy(
-            engineSource = EngineSource.LLM_FALLBACK_TO_TEMPLATE
+            engineSource = EngineSource.LLM_FALLBACK_TO_TEMPLATE,
+            isBusyFallback = isBusy
         )
     }
 

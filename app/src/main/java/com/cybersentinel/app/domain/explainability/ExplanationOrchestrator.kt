@@ -129,6 +129,7 @@ class ExplanationOrchestrator @Inject constructor(
 
     /**
      * Try LLM engine, fall back to template on any failure.
+     * C2-2.7: "busy" fallback is transparent — not counted as LLM error.
      */
     private fun tryLlmWithFallback(request: ExplanationRequest): ExplanationAnswer {
         return try {

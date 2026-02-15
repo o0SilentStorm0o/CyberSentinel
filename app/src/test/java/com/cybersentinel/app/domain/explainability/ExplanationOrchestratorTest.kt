@@ -22,6 +22,7 @@ import org.junit.Test
  *  2. LLM fallback behavior
  *  3. PolicyGuard double-check
  *  4. ExplanationAnswer model properties
+ *  5. C2-2.7: isBusyFallback field semantics
  */
 class ExplanationOrchestratorTest {
 
@@ -345,6 +346,74 @@ class ExplanationOrchestratorTest {
         val answer = templateEngine.renderFromSlots(slots, incident)
         assertEquals(EngineSource.LLM_ASSISTED, answer.engineSource)
         assertTrue(answer.reasons.isNotEmpty())
+    }
+
+    // ══════════════════════════════════════════════════════════
+    //  C2-2.7: isBusyFallback semantics
+    // ══════════════════════════════════════════════════════════
+
+    @Test
+    fun `ExplanationAnswer isBusyFallback defaults to false`() {
+        val answer = ExplanationAnswer(
+            incidentId = "test",
+            severity = IncidentSeverity.MEDIUM,
+            summary = "test",
+            reasons = emptyList(),
+            actions = emptyList(),
+            confidence = 0.5
+        )
+        assertFalse("isBusyFallback should default to false", answer.isBusyFallback)
+    }
+
+    @Test
+    fun `ExplanationAnswer isBusyFallback can be set to true`() {
+        val answer = ExplanationAnswer(
+            incidentId = "test",
+            severity = IncidentSeverity.MEDIUM,
+            summary = "test",
+            reasons = emptyList(),
+            actions = emptyList(),
+            confidence = 0.5,
+            isBusyFallback = true
+        )
+        assertTrue("isBusyFallback should be true", answer.isBusyFallback)
+    }
+
+    @Test
+    fun `ExplanationAnswer copy preserves isBusyFallback`() {
+        val original = ExplanationAnswer(
+            incidentId = "test",
+            severity = IncidentSeverity.HIGH,
+            summary = "test",
+            reasons = emptyList(),
+            actions = emptyList(),
+            confidence = 0.7,
+            isBusyFallback = true
+        )
+        val copy = original.copy(summary = "updated")
+        assertTrue("copy should preserve isBusyFallback", copy.isBusyFallback)
+    }
+
+    @Test
+    fun `ExplanationAnswer copy can override isBusyFallback`() {
+        val original = ExplanationAnswer(
+            incidentId = "test",
+            severity = IncidentSeverity.HIGH,
+            summary = "test",
+            reasons = emptyList(),
+            actions = emptyList(),
+            confidence = 0.7,
+            isBusyFallback = false
+        )
+        val copy = original.copy(isBusyFallback = true)
+        assertTrue("copy should allow overriding isBusyFallback", copy.isBusyFallback)
+    }
+
+    @Test
+    fun `template engine answer does not set isBusyFallback`() {
+        val request = ExplanationRequest(makeIncident())
+        val answer = templateEngine.explain(request)
+        assertFalse("Template answer should not be busy fallback", answer.isBusyFallback)
     }
 
     // ══════════════════════════════════════════════════════════

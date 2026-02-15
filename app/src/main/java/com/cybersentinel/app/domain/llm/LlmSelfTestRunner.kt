@@ -92,6 +92,18 @@ class LlmSelfTestRunner(
 
         val completedAt = System.currentTimeMillis()
 
+        // C2-2.7: compute stop-failure rate — runs where model hit token limit instead of proper stop
+        val maxNewTokens = inferenceConfig.maxNewTokens
+        val successfulInferenceResults = singleResults
+            .filter { it.inferenceResult.success }
+            .map { it.inferenceResult }
+        val stopFailureCount = successfulInferenceResults.count { result ->
+            val generated = result.tokensGenerated
+            generated != null && generated >= maxNewTokens
+        }
+        val stopFailureRate = if (successfulInferenceResults.isNotEmpty())
+            stopFailureCount.toFloat() / successfulInferenceResults.size else 0f
+
         return LlmBenchmarkResult(
             modelId = modelId,
             modelVersion = modelVersion,
@@ -106,7 +118,8 @@ class LlmSelfTestRunner(
             completedAt = completedAt,
             peakNativeHeapBytes = peakNativeHeap,
             avgGeneratedTokens = if (tokenCounts.isNotEmpty()) tokenCounts.average().toFloat() else 0f,
-            maxGeneratedTokens = tokenCounts.maxOrNull() ?: 0
+            maxGeneratedTokens = tokenCounts.maxOrNull() ?: 0,
+            stopFailureRate = stopFailureRate
         )
     }
 
