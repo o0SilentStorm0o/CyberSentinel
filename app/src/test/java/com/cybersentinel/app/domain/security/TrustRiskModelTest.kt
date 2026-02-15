@@ -1799,4 +1799,117 @@ class TrustRiskModelTest {
             TrustRiskModel.FindingType.VERSION_ROLLBACK.hardness
         )
     }
+
+    // ══════════════════════════════════════════════════════════
+    //  Phase DROPPER: New dropper/loader combo tests
+    // ══════════════════════════════════════════════════════════
+
+    @Test
+    fun `CRITICAL - overlay + install packages + low trust dropper combo`() {
+        val verdict = model.evaluate(
+            packageName = "com.evil.dropper",
+            trustEvidence = lowTrust("com.evil.dropper"),
+            rawFindings = emptyList(),
+            isSystemApp = false,
+            grantedPermissions = listOf(
+                "android.permission.SYSTEM_ALERT_WINDOW",
+                "android.permission.REQUEST_INSTALL_PACKAGES"
+            ),
+            appCategory = AppCategoryDetector.AppCategory.OTHER
+        )
+        assertEquals(
+            "Overlay + install_packages + low trust should be CRITICAL",
+            TrustRiskModel.EffectiveRisk.CRITICAL, verdict.effectiveRisk
+        )
+        assertTrue(
+            "Should match dropper overlay combo",
+            verdict.matchedCombos.any { it.contains("Dropper") || it.contains("overlay") }
+        )
+    }
+
+    @Test
+    fun `CRITICAL - SMS + install packages + sideloaded dropper combo`() {
+        val verdict = model.evaluate(
+            packageName = "com.evil.sms.dropper",
+            trustEvidence = sideloadedLowTrust("com.evil.sms.dropper"),
+            rawFindings = emptyList(),
+            isSystemApp = false,
+            grantedPermissions = listOf(
+                "android.permission.READ_SMS",
+                "android.permission.REQUEST_INSTALL_PACKAGES"
+            ),
+            appCategory = AppCategoryDetector.AppCategory.OTHER
+        )
+        assertEquals(
+            "SMS + install_packages + sideload should be CRITICAL",
+            TrustRiskModel.EffectiveRisk.CRITICAL, verdict.effectiveRisk
+        )
+    }
+
+    @Test
+    fun `CRITICAL - full dropper toolkit (accessibility + overlay + install packages)`() {
+        val verdict = model.evaluate(
+            packageName = "com.evil.full.dropper",
+            trustEvidence = lowTrust("com.evil.full.dropper"),
+            rawFindings = emptyList(),
+            isSystemApp = false,
+            grantedPermissions = listOf(
+                "android.permission.BIND_ACCESSIBILITY_SERVICE",
+                "android.permission.SYSTEM_ALERT_WINDOW",
+                "android.permission.REQUEST_INSTALL_PACKAGES"
+            ),
+            appCategory = AppCategoryDetector.AppCategory.OTHER
+        )
+        assertEquals(
+            "Full dropper toolkit should be CRITICAL",
+            TrustRiskModel.EffectiveRisk.CRITICAL, verdict.effectiveRisk
+        )
+        assertTrue(
+            "Should match full dropper combo",
+            verdict.matchedCombos.any {
+                it.contains("dropper", ignoreCase = true) ||
+                it.contains("Plný", ignoreCase = true)
+            }
+        )
+    }
+
+    @Test
+    fun `CRITICAL - banking overlay + sideloaded + low trust`() {
+        val verdict = model.evaluate(
+            packageName = "com.evil.banking",
+            trustEvidence = sideloadedLowTrust("com.evil.banking"),
+            rawFindings = emptyList(),
+            isSystemApp = false,
+            grantedPermissions = listOf(
+                "android.permission.SYSTEM_ALERT_WINDOW",
+                "android.permission.BIND_ACCESSIBILITY_SERVICE"
+            ),
+            appCategory = AppCategoryDetector.AppCategory.OTHER
+        )
+        assertEquals(
+            "Banking overlay attack pattern should be CRITICAL",
+            TrustRiskModel.EffectiveRisk.CRITICAL, verdict.effectiveRisk
+        )
+    }
+
+    @Test
+    fun `high trust app NOT flagged by dropper combos`() {
+        // High trust + overlay + install packages should NOT be CRITICAL
+        val verdict = model.evaluate(
+            packageName = "com.legit.installer",
+            trustEvidence = highTrust("com.legit.installer"),
+            rawFindings = emptyList(),
+            isSystemApp = false,
+            grantedPermissions = listOf(
+                "android.permission.SYSTEM_ALERT_WINDOW",
+                "android.permission.REQUEST_INSTALL_PACKAGES"
+            ),
+            appCategory = AppCategoryDetector.AppCategory.OTHER
+        )
+        // High trust should prevent CRITICAL (combo requires low trust)
+        assertNotEquals(
+            "High trust should prevent dropper combo CRITICAL",
+            TrustRiskModel.EffectiveRisk.CRITICAL, verdict.effectiveRisk
+        )
+    }
 }

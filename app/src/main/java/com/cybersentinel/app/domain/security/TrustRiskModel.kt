@@ -224,6 +224,45 @@ class TrustRiskModel @Inject constructor() {
             requiresLowTrust = true,
             respectCategoryWhitelist = false, // sideloaded VPN is always suspicious regardless of category
             severity = AppSecurityScanner.RiskLevel.HIGH
+        ),
+
+        // ── Dropper/Loader combos (timeline-aware patterns) ──
+        // Overlay + install packages + low trust → CRITICAL (dropper staging overlay attack)
+        DangerousCombo(
+            name = "Dropper: overlay + instalace aplikací + nízká důvěra",
+            requiredClusters = setOf(CapabilityCluster.OVERLAY, CapabilityCluster.INSTALL_PACKAGES),
+            requiresLowTrust = true,
+            respectCategoryWhitelist = false,
+            severity = AppSecurityScanner.RiskLevel.CRITICAL
+        ),
+        // Overlay + accessibility + sideloaded → CRITICAL (banking overlay attack)
+        // Note: This extends the existing overlay+accessibility combo with sideload
+        DangerousCombo(
+            name = "Bankovní overlay útok: overlay + accessibility + sideload",
+            requiredClusters = setOf(CapabilityCluster.OVERLAY, CapabilityCluster.ACCESSIBILITY),
+            requiresSideload = true,
+            requiresLowTrust = true,
+            respectCategoryWhitelist = false,
+            severity = AppSecurityScanner.RiskLevel.CRITICAL
+        ),
+        // SMS + install packages + sideloaded → CRITICAL (SMS-based dropper/C2)
+        DangerousCombo(
+            name = "SMS dropper: SMS + instalace + sideload",
+            requiredClusters = setOf(CapabilityCluster.SMS, CapabilityCluster.INSTALL_PACKAGES),
+            requiresSideload = true,
+            respectCategoryWhitelist = false,
+            severity = AppSecurityScanner.RiskLevel.CRITICAL
+        ),
+        // Accessibility + overlay + install packages → CRITICAL (full dropper toolkit)
+        DangerousCombo(
+            name = "Plný dropper: accessibility + overlay + instalace",
+            requiredClusters = setOf(
+                CapabilityCluster.ACCESSIBILITY,
+                CapabilityCluster.OVERLAY,
+                CapabilityCluster.INSTALL_PACKAGES
+            ),
+            respectCategoryWhitelist = false,
+            severity = AppSecurityScanner.RiskLevel.CRITICAL
         )
     )
 

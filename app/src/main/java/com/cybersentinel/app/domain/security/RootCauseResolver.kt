@@ -138,6 +138,15 @@ class DefaultRootCauseResolver : RootCauseResolver {
             }
             EventType.OVERLAY_ATTACK_PATTERN -> {
                 hypotheses.add(buildOverlayAttackHypothesis(event, app))
+                hypotheses.add(buildBankingOverlayHypothesis(event, app))
+            }
+            EventType.STAGED_PAYLOAD -> {
+                hypotheses.add(buildStagedPayloadHypothesis(event, app))
+                hypotheses.add(buildDropperHypothesis(event, app))
+            }
+            EventType.LOADER_BEHAVIOR -> {
+                hypotheses.add(buildLoaderBehaviorHypothesis(event, app))
+                hypotheses.add(buildGenericHypothesis(event, app))
             }
             else -> {
                 hypotheses.add(buildGenericHypothesis(event, app))
@@ -194,15 +203,41 @@ class DefaultRootCauseResolver : RootCauseResolver {
     private fun buildDropperHypothesis(event: SecurityEvent, app: AppFeatureVector?): Hypothesis {
         var confidence = 0.6
         val evidence = mutableListOf("Accessibility + instalace balíčků")
-        if (app?.identity?.trustScore ?: 100 < 40) {
-            confidence += 0.2
-            evidence.add("Nízká důvěra")
+        val contradicting = mutableListOf<String>()
+
+        if (app != null) {
+            if (app.identity.trustScore < 40) {
+                confidence += 0.15
+                evidence.add("Nízká důvěra (${app.identity.trustScore})")
+            }
+            if (app.identity.installerType == TrustEvidenceEngine.InstallerType.SIDELOADED) {
+                confidence += 0.1
+                evidence.add("Sideloaded instalace")
+            }
+            if (app.identity.isNewApp) {
+                confidence += 0.1
+                evidence.add("Čerstvě nainstalovaná aplikace")
+            }
+            // Check for overlay (dropper with banking attack vector)
+            val hasOverlay = app.capability.activeHighRiskClusters.any {
+                it == TrustRiskModel.CapabilityCluster.OVERLAY
+            }
+            if (hasOverlay) {
+                confidence += 0.1
+                evidence.add("Overlay oprávnění — možný bankovní útok")
+            }
+            if (app.identity.trustScore >= 70) {
+                contradicting.add("Vyšší důvěra (${app.identity.trustScore})")
+                confidence -= 0.2
+            }
         }
+
         return Hypothesis(
             name = "Dropper / instalátor malware",
             description = "Aplikace může automaticky instalovat škodlivé balíčky",
             confidence = confidence.coerceIn(0.0, 1.0),
             supportingEvidence = evidence,
+            contradictingEvidence = contradicting,
             mitreTechniques = listOf("T1544") // Ingress Tool Transfer
         )
     }
@@ -321,12 +356,155 @@ class DefaultRootCauseResolver : RootCauseResolver {
     }
 
     private fun buildOverlayAttackHypothesis(event: SecurityEvent, app: AppFeatureVector?): Hypothesis {
+        var confidence = 0.6
+        val evidence = mutableListOf("Overlay + nízká důvěra")
+        val contradicting = mutableListOf<String>()
+        if (app?.identity?.installerType == TrustEvidenceEngine.InstallerType.SIDELOADED) {
+            confidence += 0.15
+            evidence.add("Sideloaded aplikace")
+        }
+        if (app?.identity?.trustScore ?: 100 < 40) {
+            confidence += 0.1
+            evidence.add("Nízká důvěra (${app?.identity?.trustScore})")
+        }
+        if (app?.identity?.trustScore ?: 0 >= 70) {
+            contradicting.add("Vyšší důvěra (${app?.identity?.trustScore})")
+            confidence -= 0.2
+        }
         return Hypothesis(
             name = "Overlay / phishing útok",
             description = "Aplikace může překrýt jiné aplikace falešným UI",
-            confidence = 0.6,
-            supportingEvidence = listOf("Overlay + nízká důvěra"),
+            confidence = confidence.coerceIn(0.0, 1.0),
+            supportingEvidence = evidence,
+            contradictingEvidence = contradicting,
             mitreTechniques = listOf("T1660") // Phishing
+        )
+    }
+
+    private fun buildBankingOverlayHypothesis(event: SecurityEvent, app: AppFeatureVector?): Hypothesis {
+        var confidence = 0.45
+        val evidence = mutableListOf("Overlay oprávnění s podezřelým profilem")
+        val contradicting = mutableListOf<String>()
+
+        if (app != null) {
+            // Accessibility + overlay = banking trojan signature
+            val hasAccessibility = app.capability.activeHighRiskClusters.any {
+                it == TrustRiskModel.CapabilityCluster.ACCESSIBILITY
+            }
+            if (hasAccessibility) {
+                confidence += 0.2
+                evidence.add("Accessibility + overlay = bankovní trojský kůň")
+            }
+            if (app.identity.installerType == TrustEvidenceEngine.InstallerType.SIDELOADED) {
+                confidence += 0.15
+                evidence.add("Sideloaded instalace")
+            }
+            if (app.identity.trustScore < 40) {
+                confidence += 0.1
+                evidence.add("Nízká důvěra (${app.identity.trustScore})")
+            }
+            if (app.identity.isNewApp) {
+                confidence += 0.1
+                evidence.add("Čerstvě nainstalovaná aplikace")
+            }
+            if (app.identity.trustScore >= 70) {
+                contradicting.add("Vyšší důvěra (${app.identity.trustScore})")
+                confidence -= 0.25
+            }
+        }
+
+        return Hypothesis(
+            name = "Bankovní overlay útok",
+            description = "Aplikace vykazuje vzor bankovního trojského koně — overlay nad finančními aplikacemi",
+            confidence = confidence.coerceIn(0.0, 1.0),
+            supportingEvidence = evidence,
+            contradictingEvidence = contradicting,
+            mitreTechniques = listOf("T1660", "T1417") // Phishing, Input Capture
+        )
+    }
+
+    private fun buildStagedPayloadHypothesis(event: SecurityEvent, app: AppFeatureVector?): Hypothesis {
+        var confidence = 0.55
+        val evidence = mutableListOf("Časový vzor instalace → eskalace oprávnění")
+        val contradicting = mutableListOf<String>()
+
+        if (app != null) {
+            // Fresh install + capability acquisition = staged payload
+            if (app.identity.isNewApp) {
+                confidence += 0.15
+                evidence.add("Čerstvě nainstalovaná aplikace")
+            }
+            val hasInstallPackages = app.capability.activeHighRiskClusters.any {
+                it == TrustRiskModel.CapabilityCluster.INSTALL_PACKAGES
+            }
+            if (hasInstallPackages) {
+                confidence += 0.15
+                evidence.add("Oprávnění k instalaci dalších aplikací")
+            }
+            if (app.identity.installerType == TrustEvidenceEngine.InstallerType.SIDELOADED) {
+                confidence += 0.1
+                evidence.add("Sideloaded instalace")
+            }
+            if (app.identity.trustScore < 40) {
+                confidence += 0.1
+                evidence.add("Nízká důvěra (${app.identity.trustScore})")
+            }
+            if (app.identity.trustScore >= 70) {
+                contradicting.add("Vyšší důvěra aplikace")
+                confidence -= 0.25
+            }
+        }
+
+        return Hypothesis(
+            name = "Staged payload / dropper v fázích",
+            description = "Aplikace se nejprve tvářila nevinně a následně eskalovala oprávnění — vzor staged dropperu",
+            confidence = confidence.coerceIn(0.0, 1.0),
+            supportingEvidence = evidence,
+            contradictingEvidence = contradicting,
+            mitreTechniques = listOf("T1544", "T1407") // Ingress Tool Transfer, Download New Code at Runtime
+        )
+    }
+
+    private fun buildLoaderBehaviorHypothesis(event: SecurityEvent, app: AppFeatureVector?): Hypothesis {
+        var confidence = 0.5
+        val evidence = mutableListOf("Detekováno dynamické načítání kódu po instalaci")
+        val contradicting = mutableListOf<String>()
+
+        if (app != null) {
+            if (app.identity.isNewApp) {
+                confidence += 0.15
+                evidence.add("Čerstvě nainstalovaná aplikace")
+            }
+            if (app.identity.installerType == TrustEvidenceEngine.InstallerType.SIDELOADED) {
+                confidence += 0.15
+                evidence.add("Sideloaded instalace")
+            }
+            if (app.identity.trustScore < 40) {
+                confidence += 0.1
+                evidence.add("Nízká důvěra (${app.identity.trustScore})")
+            }
+            // Network burst + dynamic loading = classic loader
+            val hasNetworkBurst = event.signals.any {
+                it.type == SignalType.NETWORK_BURST_ANOMALY ||
+                it.type == SignalType.NETWORK_AFTER_INSTALL
+            }
+            if (hasNetworkBurst) {
+                confidence += 0.15
+                evidence.add("Síťový provoz po instalaci — stahování payloadu")
+            }
+            if (app.identity.trustScore >= 70) {
+                contradicting.add("Vyšší důvěra aplikace")
+                confidence -= 0.2
+            }
+        }
+
+        return Hypothesis(
+            name = "Loader / dynamický downloader",
+            description = "Aplikace se chová jako loader — stahuje a spouští kód za běhu",
+            confidence = confidence.coerceIn(0.0, 1.0),
+            supportingEvidence = evidence,
+            contradictingEvidence = contradicting,
+            mitreTechniques = listOf("T1407", "T1544") // Download New Code at Runtime, Ingress Tool Transfer
         )
     }
 

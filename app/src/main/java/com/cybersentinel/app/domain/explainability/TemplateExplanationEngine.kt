@@ -335,6 +335,10 @@ class TemplateExplanationEngine @Inject constructor(
                 "Aplikace {package} odpovídá vzoru dropper malwaru.",
             EventType.OVERLAY_ATTACK_PATTERN to
                 "Aplikace {package} může provádět overlay útok.",
+            EventType.STAGED_PAYLOAD to
+                "Aplikace {package} vykazuje vzor staged dropperu — postupná eskalace oprávnění.",
+            EventType.LOADER_BEHAVIOR to
+                "Aplikace {package} vykazuje chování loaderu — dynamicky stahuje a spouští kód.",
             EventType.CONFIG_TAMPER to
                 "Bylo detekováno podezřelé nastavení zařízení.",
             EventType.CA_CERT_INSTALLED to
@@ -364,6 +368,14 @@ class TemplateExplanationEngine @Inject constructor(
                 "Aplikace {package} odpovídá vzoru dropper malwaru — instalátor s přístupem k přístupnosti (důvěra: {confidence}).",
             "possible_dropper" to
                 "Aplikace {package} může být dropper — má instalační oprávnění a přístup k přístupnosti (důvěra: {confidence}).",
+            "staged_payload" to
+                "Aplikace {package} vykazuje vzor staged dropperu — postupně eskalovala oprávnění po tichém období (důvěra: {confidence}).",
+            "banking_overlay_attack" to
+                "Aplikace {package} vykazuje vzor bankovního trojského koně — overlay + accessibility na čerstvé instalaci (důvěra: {confidence}).",
+            "loader_behavior" to
+                "Aplikace {package} se chová jako loader — stahuje a spouští kód za běhu (důvěra: {confidence}).",
+            "dropper_timeline" to
+                "Časová analýza aplikace {package} odpovídá vzoru dropperu: instalace → eskalace oprávnění v krátkém čase (důvěra: {confidence}).",
 
             // Update/change
             "malicious_update" to
@@ -432,7 +444,14 @@ class TemplateExplanationEngine @Inject constructor(
             "ROOT_DETECTED" to "Na zařízení byl detekován root přístup.",
             "BOOTLOADER_UNLOCKED" to "Bootloader zařízení je odemčený.",
             "DEVELOPER_OPTIONS_ENABLED" to "Vývojářské možnosti jsou zapnuty.",
-            "USB_DEBUGGING_ENABLED" to "USB ladění je zapnuto — zařízení je přístupné přes ADB."
+            "USB_DEBUGGING_ENABLED" to "USB ladění je zapnuto — zařízení je přístupné přes ADB.",
+            // ── Dropper/Loader signals ──
+            "DYNAMIC_CODE_LOADING" to "Aplikace {package} dynamicky načítá kód — možné stahování škodlivého payloadu.",
+            "FRESH_INSTALL_RISKY_PERM" to "Čerstvě nainstalovaná aplikace {package} vyžádala vysoce riziková oprávnění.",
+            "NETWORK_AFTER_INSTALL" to "Aplikace {package} zahájila síťovou komunikaci ihned po instalaci.",
+            "STAGED_PAYLOAD_PATTERN" to "Aplikace {package} vykazuje vzor staged payloadu — minimální APK s postupnou eskalací.",
+            "BOOT_PERSISTENCE" to "Aplikace {package} se registrovala pro spuštění po restartu zařízení.",
+            "POST_INSTALL_PERMISSION_ESCALATION" to "Aplikace {package} eskalovala oprávnění po úvodním tichém období."
         )
 
         // ── Action title templates ──
@@ -489,7 +508,11 @@ class TemplateExplanationEngine @Inject constructor(
             "power_user_sideload" to
                 "Pokud jste aplikaci záměrně nainstalovali z APKMirror nebo podobného zdroje, je to pravděpodobně v pořádku.",
             "vpn_by_choice" to
-                "Pokud VPN používáte záměrně (např. pro ochranu soukromí), je to v pořádku."
+                "Pokud VPN používáte záměrně (např. pro ochranu soukromí), je to v pořádku.",
+            "fresh_install_escalation" to
+                "Pokud jste právě nainstalovali aplikaci a udělili jí oprávnění sami, je to pravděpodobně v pořádku.",
+            "legitimate_code_loading" to
+                "Některé legitimní aplikace (hry, pluginové systémy) načítají kód dynamicky. Pokud aplikaci důvěřujete, můžete nález ignorovat."
         )
     }
 }

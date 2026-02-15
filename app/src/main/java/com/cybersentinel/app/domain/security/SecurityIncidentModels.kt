@@ -81,6 +81,20 @@ enum class SignalType {
     DEVELOPER_OPTIONS_ENABLED,
     USB_DEBUGGING_ENABLED,
     
+    // ── Dropper / Loader signals ──
+    /** App loads code dynamically (DexClassLoader, reflection) */
+    DYNAMIC_CODE_LOADING,
+    /** Fresh install immediately requests high-risk permissions */
+    FRESH_INSTALL_RISKY_PERM,
+    /** Significant network traffic right after install (payload fetch) */
+    NETWORK_AFTER_INSTALL,
+    /** Staged payload detected: minimal APK → post-install expansion */
+    STAGED_PAYLOAD_PATTERN,
+    /** App registers BOOT_COMPLETED receiver for persistence */
+    BOOT_PERSISTENCE,
+    /** Post-install escalation: new perms requested after initial quiet period */
+    POST_INSTALL_PERMISSION_ESCALATION,
+
     // ── Behavioral signals (Sentinel, future) ──
     BATTERY_DRAIN_ANOMALY,
     NETWORK_BURST_ANOMALY,
@@ -135,6 +149,10 @@ enum class EventType {
     DROPPER_PATTERN,
     /** Overlay + phishing pattern */
     OVERLAY_ATTACK_PATTERN,
+    /** Staged payload: app installs then escalates over time */
+    STAGED_PAYLOAD,
+    /** Loader behavior: benign app fetches and executes remote code */
+    LOADER_BEHAVIOR,
 
     // ── Config events ──
     /** Device config changed in suspicious way */

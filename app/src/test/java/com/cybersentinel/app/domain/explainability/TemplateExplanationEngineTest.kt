@@ -530,4 +530,133 @@ class TemplateExplanationEngineTest {
         val answer = engine.explain(ExplanationRequest(incident))
         assertTrue(answer.summary.contains("nastavení"))
     }
+
+    // ══════════════════════════════════════════════════════════
+    //  Phase DROPPER: New event/signal/hypothesis templates
+    // ══════════════════════════════════════════════════════════
+
+    @Test
+    fun `STAGED_PAYLOAD event generates staged dropper summary`() {
+        val incident = makeIncident(
+            severity = IncidentSeverity.HIGH,
+            events = listOf(
+                makeEvent(EventType.STAGED_PAYLOAD, listOf(
+                    makeSignal(SignalType.STAGED_PAYLOAD_PATTERN)
+                ))
+            ),
+            hypotheses = listOf(makeHypothesis("staged_payload", 0.7))
+        )
+        val answer = engine.explain(ExplanationRequest(incident))
+        assertTrue(
+            "Summary should mention staged dropper",
+            answer.summary.contains("staged") || answer.summary.contains("eskalace")
+        )
+    }
+
+    @Test
+    fun `LOADER_BEHAVIOR event generates loader summary`() {
+        val incident = makeIncident(
+            severity = IncidentSeverity.HIGH,
+            events = listOf(
+                makeEvent(EventType.LOADER_BEHAVIOR, listOf(
+                    makeSignal(SignalType.DYNAMIC_CODE_LOADING)
+                ))
+            ),
+            hypotheses = listOf(makeHypothesis("loader_behavior", 0.6))
+        )
+        val answer = engine.explain(ExplanationRequest(incident))
+        assertTrue(
+            "Summary should mention loader",
+            answer.summary.contains("loader") || answer.summary.contains("stahuje")
+        )
+    }
+
+    @Test
+    fun `DROPPER_PATTERN event still works with dropper hypothesis`() {
+        val incident = makeIncident(
+            severity = IncidentSeverity.CRITICAL,
+            events = listOf(
+                makeEvent(EventType.DROPPER_PATTERN, listOf(
+                    makeSignal(SignalType.COMBO_DETECTED)
+                ))
+            ),
+            hypotheses = listOf(makeHypothesis("dropper_pattern", 0.8))
+        )
+        val answer = engine.explain(ExplanationRequest(incident))
+        assertTrue(
+            "Summary should mention dropper",
+            answer.summary.contains("dropper")
+        )
+    }
+
+    @Test
+    fun `banking overlay hypothesis renders correctly`() {
+        val incident = makeIncident(
+            severity = IncidentSeverity.CRITICAL,
+            events = listOf(
+                makeEvent(EventType.OVERLAY_ATTACK_PATTERN, listOf(
+                    makeSignal(SignalType.SPECIAL_ACCESS_ENABLED)
+                ))
+            ),
+            hypotheses = listOf(makeHypothesis("banking_overlay_attack", 0.75))
+        )
+        val answer = engine.explain(ExplanationRequest(incident))
+        assertTrue(
+            "Reasons should contain banking overlay template",
+            answer.reasons.any { it.text.contains("bankovní") || it.text.contains("overlay") }
+        )
+    }
+
+    @Test
+    fun `dropper timeline hypothesis renders correctly`() {
+        val incident = makeIncident(
+            severity = IncidentSeverity.HIGH,
+            events = listOf(
+                makeEvent(EventType.STAGED_PAYLOAD, listOf(
+                    makeSignal(SignalType.FRESH_INSTALL_RISKY_PERM)
+                ))
+            ),
+            hypotheses = listOf(makeHypothesis("dropper_timeline", 0.65))
+        )
+        val answer = engine.explain(ExplanationRequest(incident))
+        assertTrue(
+            "Reasons should contain timeline template",
+            answer.reasons.any { it.text.contains("Časová") || it.text.contains("eskalace") }
+        )
+    }
+
+    @Test
+    fun `new signal types have reason templates`() {
+        // Verify all new signal types are in the template map
+        val templates = TemplateExplanationEngine.signalReasonTemplates
+        assertTrue("DYNAMIC_CODE_LOADING should have template", templates.containsKey("DYNAMIC_CODE_LOADING"))
+        assertTrue("FRESH_INSTALL_RISKY_PERM should have template", templates.containsKey("FRESH_INSTALL_RISKY_PERM"))
+        assertTrue("NETWORK_AFTER_INSTALL should have template", templates.containsKey("NETWORK_AFTER_INSTALL"))
+        assertTrue("STAGED_PAYLOAD_PATTERN should have template", templates.containsKey("STAGED_PAYLOAD_PATTERN"))
+        assertTrue("BOOT_PERSISTENCE should have template", templates.containsKey("BOOT_PERSISTENCE"))
+        assertTrue("POST_INSTALL_PERMISSION_ESCALATION should have template", templates.containsKey("POST_INSTALL_PERMISSION_ESCALATION"))
+    }
+
+    @Test
+    fun `new hypothesis types have reason templates`() {
+        val templates = TemplateExplanationEngine.hypothesisReasonTemplates
+        assertTrue("staged_payload should have template", templates.containsKey("staged_payload"))
+        assertTrue("banking_overlay_attack should have template", templates.containsKey("banking_overlay_attack"))
+        assertTrue("loader_behavior should have template", templates.containsKey("loader_behavior"))
+        assertTrue("dropper_timeline should have template", templates.containsKey("dropper_timeline"))
+    }
+
+    @Test
+    fun `new event types have summary templates`() {
+        val templates = TemplateExplanationEngine.summaryTemplates
+        assertTrue("STAGED_PAYLOAD should have template", templates.containsKey(EventType.STAGED_PAYLOAD))
+        assertTrue("LOADER_BEHAVIOR should have template", templates.containsKey(EventType.LOADER_BEHAVIOR))
+    }
+
+    @Test
+    fun `new ignore reason templates exist`() {
+        val templates = TemplateExplanationEngine.ignoreReasonTemplates
+        assertTrue("fresh_install_escalation should exist", templates.containsKey("fresh_install_escalation"))
+        assertTrue("legitimate_code_loading should exist", templates.containsKey("legitimate_code_loading"))
+    }
 }
