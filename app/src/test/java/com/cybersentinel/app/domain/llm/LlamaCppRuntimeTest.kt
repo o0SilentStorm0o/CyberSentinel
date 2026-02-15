@@ -4,14 +4,15 @@ import org.junit.Assert.*
 import org.junit.Test
 
 /**
- * Unit tests for LlamaCppRuntime — Sprint C2-2.
+ * Unit tests for LlamaCppRuntime — Sprint C2-2 + C2-2.5.
  *
  * Note: These tests run in JVM (not on device), so:
  *  - No actual JNI calls (UnsatisfiedLinkError expected)
  *  - Build.SUPPORTED_ABIS is null/empty in JVM → isArm64Device() returns false
- *  - Tests focus on: ABI gating, unloaded state behavior, contract compliance
+ *  - Tests focus on: ABI gating, unloaded state behavior, contract compliance,
+ *    cancel support, timeout grace constant, deterministic config
  *
- * On-device/instrumented tests for actual inference are separate (future C2-3).
+ * On-device/instrumented tests are in LlmPipelineSmokeTest (androidTest).
  */
 class LlamaCppRuntimeTest {
 
@@ -145,26 +146,55 @@ class LlamaCppRuntimeTest {
     }
 
     // ══════════════════════════════════════════════════════════
-    //  Config variants
+    //  Config variants (C2-2.5: deterministic defaults)
     // ══════════════════════════════════════════════════════════
 
     @Test
-    fun `SLOTS_DEFAULT config has correct values`() {
+    fun `SLOTS_DEFAULT config has deterministic temperature`() {
         val config = InferenceConfig.SLOTS_DEFAULT
         assertEquals(160, config.maxNewTokens)
-        assertEquals(0.1f, config.temperature, 0.001f)
-        assertEquals(0.9f, config.topP, 0.001f)
+        assertEquals(0.0f, config.temperature, 0.001f)  // C2-2.5: greedy
+        assertEquals(1.0f, config.topP, 0.001f)          // C2-2.5: no top-p filtering
         assertEquals(15_000L, config.timeoutMs)
     }
 
     @Test
-    fun `TIER1_CONSERVATIVE config is more constrained`() {
+    fun `TIER1_CONSERVATIVE config has deterministic temperature`() {
         val config = InferenceConfig.TIER1_CONSERVATIVE
+        assertEquals(0.0f, config.temperature, 0.001f)  // C2-2.5: greedy
+        assertEquals(1.0f, config.topP, 0.001f)          // C2-2.5: no top-p filtering
         assertTrue("TIER1 maxTokens should be ≤ SLOTS_DEFAULT",
             config.maxNewTokens <= InferenceConfig.SLOTS_DEFAULT.maxNewTokens)
-        assertTrue("TIER1 temperature should be ≤ SLOTS_DEFAULT",
-            config.temperature <= InferenceConfig.SLOTS_DEFAULT.temperature)
         assertTrue("TIER1 timeout should be ≥ SLOTS_DEFAULT",
             config.timeoutMs >= InferenceConfig.SLOTS_DEFAULT.timeoutMs)
+    }
+
+    // ══════════════════════════════════════════════════════════
+    //  C2-2.5: Timeout grace and cancel support
+    // ══════════════════════════════════════════════════════════
+
+    @Test
+    fun `TIMEOUT_GRACE_MS is positive`() {
+        assertTrue("Grace period should be > 0", LlamaCppRuntime.TIMEOUT_GRACE_MS > 0)
+    }
+
+    @Test
+    fun `TIMEOUT_GRACE_MS is reasonable (under 2 seconds)`() {
+        assertTrue("Grace period should be < 2000ms", LlamaCppRuntime.TIMEOUT_GRACE_MS < 2000)
+    }
+
+    @Test
+    fun `cancelInference after shutdown does not throw`() {
+        val runtime = LlamaCppRuntime.createUnloaded()
+        runtime.shutdown()
+        runtime.cancelInference() // Should be safe after shutdown
+    }
+
+    @Test
+    fun `shutdown then runInference returns failure`() {
+        val runtime = LlamaCppRuntime.createUnloaded()
+        runtime.shutdown()
+        val result = runtime.runInference("test", InferenceConfig.SLOTS_DEFAULT)
+        assertFalse(result.success)
     }
 }

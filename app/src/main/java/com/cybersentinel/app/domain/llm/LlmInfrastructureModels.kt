@@ -119,14 +119,19 @@ enum class DownloadState {
  * Configuration for a single inference call.
  *
  * Keeps inference tightly constrained — we generate structured slots, not essays.
+ *
+ * C2-2.5 note: temperature is set to 0.0 (deterministic greedy) for maximum
+ * schema compliance. The JNI layer enforces greedy argmax regardless of this
+ * value, but we set it here for documentation and future runtime switchability.
+ * topP is set to 1.0 (no nucleus filtering — greedy picks the single best token).
  */
 data class InferenceConfig(
     /** Maximum new tokens to generate (keep low for slot-only output) */
     val maxNewTokens: Int = 160,
-    /** Temperature: lower = more deterministic (good for structured output) */
-    val temperature: Float = 0.1f,
-    /** Top-p (nucleus sampling) — keep tight for structured output */
-    val topP: Float = 0.9f,
+    /** Temperature: 0.0 = deterministic greedy (C2-2.5: always 0 for slots-only) */
+    val temperature: Float = 0.0f,
+    /** Top-p: 1.0 = no filtering (C2-2.5: greedy argmax, topP ignored by JNI) */
+    val topP: Float = 1.0f,
     /** Stop sequences — stop generation when any of these are produced */
     val stopSequences: List<String> = listOf("```", "\n\n\n"),
     /** Timeout in milliseconds — hard limit on inference time */
@@ -135,19 +140,19 @@ data class InferenceConfig(
     val measureTiming: Boolean = true
 ) {
     companion object {
-        /** Default config optimized for structured slot generation */
+        /** Default config optimized for deterministic structured slot generation */
         val SLOTS_DEFAULT = InferenceConfig(
             maxNewTokens = 160,
-            temperature = 0.1f,
-            topP = 0.9f,
+            temperature = 0.0f,
+            topP = 1.0f,
             timeoutMs = 15_000
         )
 
-        /** More conservative config for Tier 1 devices */
+        /** More conservative config for Tier 1 devices (lower token budget, longer timeout) */
         val TIER1_CONSERVATIVE = InferenceConfig(
             maxNewTokens = 120,
-            temperature = 0.05f,
-            topP = 0.85f,
+            temperature = 0.0f,
+            topP = 1.0f,
             timeoutMs = 20_000
         )
     }

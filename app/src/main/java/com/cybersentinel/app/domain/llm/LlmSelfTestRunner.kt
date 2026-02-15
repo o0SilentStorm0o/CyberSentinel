@@ -37,7 +37,12 @@ class LlmSelfTestRunner(
     private val slotValidator: SlotValidator,
     private val templateEngine: TemplateExplanationEngine,
     private val policyGuard: PolicyGuard,
-    private val inferenceConfig: InferenceConfig = InferenceConfig.SLOTS_DEFAULT
+    private val inferenceConfig: InferenceConfig = InferenceConfig.SLOTS_DEFAULT,
+    /**
+     * Optional native heap tracker. On real devices, pass { Debug.getNativeHeapAllocatedSize() }.
+     * In unit tests, defaults to a no-op returning 0 (Debug API is stubbed).
+     */
+    private val nativeHeapBytesProvider: () -> Long = { 0L }
 ) {
 
     // ══════════════════════════════════════════════════════════
@@ -63,14 +68,22 @@ class LlmSelfTestRunner(
         val startedAt = System.currentTimeMillis()
         val singleResults = mutableListOf<SingleRunResult>()
         val inferenceResults = mutableListOf<InferenceResult>()
+        var peakNativeHeap = 0L
 
         val severities = IncidentSeverity.values()
 
         for (i in 0 until runs) {
+            // Measure native heap before and after each run
+            val heapBefore = nativeHeapBytesProvider()
+
             val severity = severities[i % severities.size]
             val result = runSingle(i, severity)
             singleResults.add(result)
             inferenceResults.add(result.inferenceResult)
+
+            val heapAfter = nativeHeapBytesProvider()
+            val heapMax = maxOf(heapBefore, heapAfter)
+            if (heapMax > peakNativeHeap) peakNativeHeap = heapMax
         }
 
         val completedAt = System.currentTimeMillis()
@@ -86,7 +99,8 @@ class LlmSelfTestRunner(
             pipeline = computePipelineMetrics(singleResults),
             inferenceConfig = inferenceConfig,
             startedAt = startedAt,
-            completedAt = completedAt
+            completedAt = completedAt,
+            peakNativeHeapBytes = peakNativeHeap
         )
     }
 

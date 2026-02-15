@@ -291,6 +291,23 @@ class ModelManager @Inject constructor(
      * The signature covers: modelId|version|sha256|downloadUrl
      * Key is provided by the server / embedded in the app (for MVP).
      *
+     * ⚠️ THREAT MODEL NOTE (C2-2.5):
+     *   HMAC is a symmetric scheme — the key is embedded in the APK and can be
+     *   extracted by an attacker who decompiles the app. This means HMAC protects
+     *   against ACCIDENTAL tampering (CDN corruption, network bit-flip, misconfigured
+     *   proxy), but NOT against a motivated attacker who can sign their own manifest.
+     *
+     *   For production hardening, migrate to ASYMMETRIC signature verification:
+     *     - Server signs manifest with a private key (Ed25519 or ECDSA P-256)
+     *     - App verifies with pinned public key (cannot be used to forge signatures)
+     *     - Combined with pinned TLS + SHA-256 file hash, this forms a complete
+     *       supply-chain integrity chain.
+     *
+     *   The current HMAC + SHA-256 file hash is still valuable:
+     *     - SHA-256 of the model file itself is the hard integrity gate
+     *     - HMAC of the manifest prevents casual URL/hash swaps
+     *     - Together they block most realistic attack vectors for an on-device MVP
+     *
      * @param manifest The manifest to verify
      * @param signature HMAC-SHA256 signature (hex string)
      * @param key HMAC key

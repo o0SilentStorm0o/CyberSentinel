@@ -445,7 +445,8 @@ class LlmPipelineIntegrationTest {
     fun `InferenceConfig SLOTS_DEFAULT has correct values`() {
         val config = InferenceConfig.SLOTS_DEFAULT
         assertEquals(160, config.maxNewTokens)
-        assertEquals(0.1f, config.temperature, 0.001f)
+        assertEquals(0.0f, config.temperature, 0.001f)  // C2-2.5: greedy
+        assertEquals(1.0f, config.topP, 0.001f)          // C2-2.5: no top-p
         assertEquals(15_000L, config.timeoutMs)
     }
 

@@ -7,11 +7,11 @@ import org.junit.Before
 import org.junit.Test
 
 /**
- * Unit tests for LlmSelfTestRunner + LlmBenchmarkMetrics — Sprint C2-3.
+ * Unit tests for LlmSelfTestRunner + LlmBenchmarkMetrics — Sprint C2-3 + C2-2.5.
  *
  * Uses FakeLlmRuntime for deterministic, fast benchmarking.
  * Tests verify: metric computation, fixture generation, pipeline coverage,
- * failure mode handling, smoke test compatibility.
+ * failure mode handling, smoke test compatibility, p99 latency, heap tracking.
  */
 class LlmSelfTestRunnerTest {
 
@@ -93,6 +93,7 @@ class LlmSelfTestRunnerTest {
         assertTrue("avgMs ≤ maxMs", latency.avgMs <= latency.maxMs)
         assertTrue("medianMs ≥ 0", latency.medianMs >= 0)
         assertTrue("p95Ms ≥ medianMs", latency.p95Ms >= latency.medianMs)
+        assertTrue("p99Ms ≥ p95Ms", latency.p99Ms >= latency.p95Ms)
     }
 
     @Test
@@ -391,5 +392,51 @@ class LlmSelfTestRunnerTest {
         assertEquals(1, metrics.oomCount)
         assertEquals(1, metrics.timeoutCount)
         assertEquals(1, metrics.otherErrorCount)
+    }
+
+    // ══════════════════════════════════════════════════════════
+    //  C2-2.5: p99 latency + heap tracking
+    // ══════════════════════════════════════════════════════════
+
+    @Test
+    fun `LatencyMetrics fromResults computes p99`() {
+        // 20 results → p99 index = (20 * 0.99).toInt() = 19 → last element
+        val results = (1..20).map {
+            InferenceResult.success("out$it", totalTimeMs = it * 10L, tokensGenerated = 10)
+        }
+        val metrics = LatencyMetrics.fromResults(results)
+        assertTrue("p99Ms should be ≥ p95Ms", metrics.p99Ms >= metrics.p95Ms)
+        assertTrue("p99Ms should be ≤ maxMs", metrics.p99Ms <= metrics.maxMs)
+    }
+
+    @Test
+    fun `benchmark result peakNativeHeapBytes defaults to 0 in unit tests`() {
+        val result = runner.runBenchmark(runs = 5)
+        assertEquals("No native heap in JVM test", 0L, result.peakNativeHeapBytes)
+    }
+
+    @Test
+    fun `runner with custom nativeHeapBytesProvider tracks peak`() {
+        var heapCounter = 1_000_000L
+        val customRunner = LlmSelfTestRunner(
+            runtime = runtime,
+            promptBuilder = PromptBuilder(),
+            slotParser = SlotParser(),
+            slotValidator = SlotValidator(),
+            templateEngine = templateEngine,
+            policyGuard = policyGuard,
+            inferenceConfig = InferenceConfig.SLOTS_DEFAULT,
+            nativeHeapBytesProvider = { heapCounter.also { heapCounter += 500_000 } }
+        )
+        val result = customRunner.runBenchmark(runs = 5)
+        assertTrue("Peak heap should reflect provider", result.peakNativeHeapBytes >= 1_000_000L)
+    }
+
+    @Test
+    fun `benchmark summary contains p99`() {
+        // Create a result with non-zero latency to trigger p99 in summary
+        val result = runner.runBenchmark(runs = 10, modelId = "p99-test", modelVersion = "1.0")
+        val summary = result.summary
+        assertTrue("Summary should contain p99", summary.contains("p99"))
     }
 }

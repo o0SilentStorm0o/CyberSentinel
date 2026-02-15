@@ -44,7 +44,17 @@ data class LlmBenchmarkResult(
     /** Timestamp when benchmark started */
     val startedAt: Long,
     /** Timestamp when benchmark completed */
-    val completedAt: Long
+    val completedAt: Long,
+    /**
+     * Peak native heap allocation observed during the benchmark (bytes).
+     * Measured via Debug.getNativeHeapAllocatedSize() before/after each run.
+     * 0 if not available (e.g., in unit tests where Debug API is stubbed).
+     *
+     * This is a proxy for memory pressure — "0 OOM in 20 runs" doesn't mean safe
+     * if native heap is near the limit. Track this to detect fragmentation/GC pressure
+     * before it becomes a production OOM.
+     */
+    val peakNativeHeapBytes: Long = 0
 ) {
     /** Total benchmark duration in milliseconds */
     val durationMs: Long get() = completedAt - startedAt
@@ -68,9 +78,12 @@ data class LlmBenchmarkResult(
             appendLine("Model: $modelId ($modelVersion)")
             appendLine("Runtime: $runtimeId")
             appendLine("Runs: $totalRuns | Health: ${"%.0f".format(healthScore * 100)}%")
-            appendLine("Latency: avg ${latency.avgMs}ms, p95 ${latency.p95Ms}ms")
+            appendLine("Latency: avg ${latency.avgMs}ms, p95 ${latency.p95Ms}ms, p99 ${latency.p99Ms}ms")
             appendLine("Compliance: ${"%.1f".format(quality.schemaComplianceRate * 100)}%")
             appendLine("Fallback: ${"%.1f".format(pipeline.templateFallbackRate * 100)}%")
+            if (peakNativeHeapBytes > 0) {
+                appendLine("Peak native heap: ${peakNativeHeapBytes / (1024 * 1024)}MB")
+            }
             if (stability.oomCount > 0) appendLine("⚠️ OOM: ${stability.oomCount}")
             if (stability.timeoutCount > 0) appendLine("⚠️ Timeouts: ${stability.timeoutCount}")
         }
@@ -94,13 +107,15 @@ data class LatencyMetrics(
     val medianMs: Long,
     /** 95th percentile total inference time (ms) */
     val p95Ms: Long,
+    /** 99th percentile total inference time (ms) — shows "bad device tails" */
+    val p99Ms: Long,
     /** Average time to first token (ms) — estimated if not streaming */
     val avgTtftMs: Long,
     /** Average tokens per second */
     val avgTokensPerSecond: Float
 ) {
     companion object {
-        val EMPTY = LatencyMetrics(0, 0, 0, 0, 0, 0, 0f)
+        val EMPTY = LatencyMetrics(0, 0, 0, 0, 0, 0, 0, 0f)
 
         /**
          * Compute latency metrics from a list of inference results.
@@ -119,6 +134,7 @@ data class LatencyMetrics(
                 maxMs = times.last(),
                 medianMs = times[times.size / 2],
                 p95Ms = times[(times.size * 0.95).toInt().coerceAtMost(times.size - 1)],
+                p99Ms = times[(times.size * 0.99).toInt().coerceAtMost(times.size - 1)],
                 avgTtftMs = if (ttfts.isNotEmpty()) ttfts.average().toLong() else 0,
                 avgTokensPerSecond = if (tps.isNotEmpty()) tps.average().toFloat() else 0f
             )

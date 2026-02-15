@@ -26,6 +26,8 @@ android {
         versionName = "1.0.0"
         vectorDrawables { useSupportLibrary = true }
 
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
         // NDK: LLM inference is arm64-only (32-bit falls back to template engine)
         ndk { abiFilters += listOf("arm64-v8a") }
     }
@@ -155,6 +157,8 @@ dependencies {
 
 // Testing
     testImplementation("junit:junit:4.13.2")
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    androidTestImplementation("androidx.test:runner:1.6.1")
 }
 
 kapt {

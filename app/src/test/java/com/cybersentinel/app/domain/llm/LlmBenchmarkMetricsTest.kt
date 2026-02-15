@@ -4,9 +4,10 @@ import org.junit.Assert.*
 import org.junit.Test
 
 /**
- * Unit tests for LlmBenchmarkMetrics data classes.
+ * Unit tests for LlmBenchmarkMetrics data classes — C2-2.5.
  *
  * Verifies: computed properties, edge cases, companion object factories.
+ * C2-2.5: LatencyMetrics now includes p99Ms, LlmBenchmarkResult includes peakNativeHeapBytes.
  */
 class LlmBenchmarkMetricsTest {
 
@@ -22,6 +23,7 @@ class LlmBenchmarkMetricsTest {
         assertEquals(0L, m.maxMs)
         assertEquals(0L, m.medianMs)
         assertEquals(0L, m.p95Ms)
+        assertEquals(0L, m.p99Ms)
         assertEquals(0L, m.avgTtftMs)
         assertEquals(0f, m.avgTokensPerSecond, 0.001f)
     }
@@ -37,6 +39,7 @@ class LlmBenchmarkMetricsTest {
         assertEquals(50L, m.maxMs)
         assertEquals(50L, m.medianMs)
         assertEquals(50L, m.p95Ms)
+        assertEquals(50L, m.p99Ms)
         assertEquals(10L, m.avgTtftMs)
         assertTrue(m.avgTokensPerSecond > 0f)
     }
@@ -191,7 +194,7 @@ class LlmBenchmarkMetricsTest {
             modelVersion = "1.0",
             runtimeId = "test-runtime",
             totalRuns = 5,
-            latency = LatencyMetrics(100, 50, 200, 100, 180, 30, 10f),
+            latency = LatencyMetrics(100, 50, 200, 100, 180, 190, 30, 10f),
             stability = StabilityMetrics(5, 5, 0, 0, 0),
             quality = QualityMetrics(0.8f, 0.9f, 0, 0.75, 1, 0),
             pipeline = PipelineMetrics(1f, 1f, 0.8f, 0.1f, 0.2f),
