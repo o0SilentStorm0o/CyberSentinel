@@ -40,7 +40,9 @@ import com.cybersentinel.app.domain.security.resolveAction
 @Composable
 fun DashboardScreen(
     viewModel: DashboardViewModel = hiltViewModel(),
-    onNavigateToIssue: (SecurityIssue) -> Unit = {}
+    onNavigateToIssue: (SecurityIssue) -> Unit = {},
+    onNavigateToIncidents: () -> Unit = {},
+    onNavigateToAiStatus: () -> Unit = {}
 ) {
     val ui by viewModel.ui.collectAsStateWithLifecycle()
     
@@ -95,6 +97,14 @@ fun DashboardScreen(
                 // Quick Actions
                 item {
                     QuickActionsRow()
+                }
+
+                // Sprint UI-1: Incident & AI shortcuts
+                item {
+                    IncidentShortcutRow(
+                        onNavigateToIncidents = onNavigateToIncidents,
+                        onNavigateToAiStatus = onNavigateToAiStatus
+                    )
                 }
                 
                 // Issues List
@@ -262,6 +272,33 @@ private fun QuickActionsRow() {
             label = "Heslo",
             modifier = Modifier.weight(1f),
             onClick = { }
+        )
+    }
+}
+
+/**
+ * Sprint UI-1: Shortcut row for Incident list + AI status.
+ */
+@Composable
+private fun IncidentShortcutRow(
+    onNavigateToIncidents: () -> Unit,
+    onNavigateToAiStatus: () -> Unit
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        QuickActionButton(
+            icon = Icons.Default.Notifications,
+            label = "Incidenty",
+            modifier = Modifier.weight(1f),
+            onClick = onNavigateToIncidents
+        )
+        QuickActionButton(
+            icon = Icons.Default.Memory,
+            label = "AI & Model",
+            modifier = Modifier.weight(1f),
+            onClick = onNavigateToAiStatus
         )
     }
 }

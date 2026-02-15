@@ -8,10 +8,15 @@ import androidx.compose.ui.Modifier
 import androidx.navigation.NavDestination.Companion.hierarchy
 import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.NavHostController
+import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
+import androidx.navigation.navArgument
+import com.cybersentinel.app.ui.incidents.AiStatusScreen
+import com.cybersentinel.app.ui.incidents.IncidentDetailScreen
+import com.cybersentinel.app.ui.incidents.IncidentListScreen
 import com.cybersentinel.app.ui.screens.appscan.AppScanScreen
 import com.cybersentinel.app.ui.screens.dashboard.DashboardScreen
 import com.cybersentinel.ui.screens.home.HomeScreen
@@ -41,7 +46,14 @@ fun CyberSentinelNavigation(
                 .padding(innerPadding)
         ) {
             composable(Screen.Dashboard.route) {
-                DashboardScreen()
+                DashboardScreen(
+                    onNavigateToIncidents = {
+                        navController.navigate(Screen.IncidentList.route)
+                    },
+                    onNavigateToAiStatus = {
+                        navController.navigate(Screen.AiStatus.route)
+                    }
+                )
             }
             
             composable(Screen.AppScan.route) {
@@ -68,6 +80,32 @@ fun CyberSentinelNavigation(
             
             composable(Screen.Settings.route) {
                 SettingsScreen()
+            }
+
+            // ── Sprint UI-1: Incident-first screens ──
+
+            composable(Screen.IncidentList.route) {
+                IncidentListScreen(
+                    onIncidentClick = { eventId ->
+                        navController.navigate(Screen.IncidentDetail.createRoute(eventId))
+                    }
+                )
+            }
+
+            composable(
+                route = Screen.IncidentDetail.route,
+                arguments = listOf(navArgument("eventId") { type = NavType.StringType })
+            ) {
+                IncidentDetailScreen(
+                    onBack = { navController.popBackStack() }
+                )
+            }
+
+            composable(Screen.AiStatus.route) {
+                AiStatusScreen(
+                    onBack = { navController.popBackStack() },
+                    onRunSelfTest = { /* TODO: wire LlmSelfTestRunner */ }
+                )
             }
         }
     }
