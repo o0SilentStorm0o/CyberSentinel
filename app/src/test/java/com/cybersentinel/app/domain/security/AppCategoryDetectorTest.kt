@@ -325,7 +325,7 @@ class AppCategoryDetectorTest {
     }
 
     @Test
-    fun `category count is 16`() {
-        assertEquals(16, AppCategoryDetector.AppCategory.entries.size)
+    fun `category count is 20`() {
+        assertEquals(20, AppCategoryDetector.AppCategory.entries.size)
     }
 }

@@ -4,12 +4,13 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
- * Trust & Risk Model v3 — Production-grade 3-axis evidence-based evaluation.
+ * Trust & Risk Model v4 — Production-grade 3-axis evidence-based evaluation.
  *
  * Design principles:
  *  1. Conservative on false positives — NEEDS_ATTENTION < 5% on a normal phone
  *  2. Aggressive on genuine threats — CRITICAL for hard findings + combos
  *  3. Stable between scans — same app, same state = same verdict
+ *  4. Population-aware — system apps have different norms than user-installed apps
  *
  * 3-axis evaluation:
  *  Axis A: Identity & Provenance (Trust) — who is it and where did it come from?
@@ -22,11 +23,74 @@ import javax.inject.Singleton
  *  - NEEDS_ATTENTION requires COMBO: low trust + high-risk cluster + extra signal
  *  - Unknown category = default-safe mode (clusters → INFO, not alarm)
  *  - Privacy capabilities (camera, mic, contacts, location) = NEVER an alarm
+ *  - System preinstalled apps use SYSTEM policy profile: hygiene findings (old SDK,
+ *    exported components, over-privileged) are suppressed — only hard evidence triggers alarm
  *
  * 4-state output: Safe / Info / NeedsAttention / Critical
  */
 @Singleton
 class TrustRiskModel @Inject constructor() {
+
+    // ══════════════════════════════════════════════════════════
+    //  Install class — distinguishes "new to baseline" from "genuinely new install"
+    // ══════════════════════════════════════════════════════════
+
+    /**
+     * Classifies how an app arrived on the device.
+     *
+     * SYSTEM_PREINSTALLED: shipped with the ROM (FLAG_SYSTEM, installer null/"android",
+     *   firstInstallTime near device epoch). These are NEVER "new installs" — when they
+     *   first appear in a scan it's because the user toggled system visibility, not
+     *   because anything changed on the device.
+     *
+     * USER_INSTALLED: explicitly installed by the user (Play Store, sideload, etc.)
+     *
+     * ENTERPRISE_MANAGED: pushed via MDM / device-owner policy
+     */
+    enum class InstallClass {
+        SYSTEM_PREINSTALLED,
+        USER_INSTALLED,
+        ENTERPRISE_MANAGED
+    }
+
+    /**
+     * Policy profile — different populations need different thresholds.
+     *
+     * USER: default thresholds (current behavior)
+     * SYSTEM: higher tolerance for hygiene findings (old SDK, exported components,
+     *   over-privileged). Only hard evidence (cert change, suspicious installer,
+     *   hooking frameworks) triggers escalation.
+     */
+    enum class PolicyProfile {
+        USER,
+        SYSTEM
+    }
+
+    /**
+     * Determine install class from available evidence.
+     */
+    fun classifyInstall(
+        isSystemApp: Boolean,
+        installerType: TrustEvidenceEngine.InstallerType,
+        partition: TrustEvidenceEngine.AppPartition
+    ): InstallClass = when {
+        installerType == TrustEvidenceEngine.InstallerType.MDM_INSTALLER -> InstallClass.ENTERPRISE_MANAGED
+        isSystemApp || partition in setOf(
+            TrustEvidenceEngine.AppPartition.SYSTEM,
+            TrustEvidenceEngine.AppPartition.VENDOR,
+            TrustEvidenceEngine.AppPartition.PRODUCT
+        ) -> InstallClass.SYSTEM_PREINSTALLED
+        else -> InstallClass.USER_INSTALLED
+    }
+
+    /**
+     * Determine policy profile from install class.
+     */
+    fun policyProfileFor(installClass: InstallClass): PolicyProfile = when (installClass) {
+        InstallClass.SYSTEM_PREINSTALLED -> PolicyProfile.SYSTEM
+        InstallClass.ENTERPRISE_MANAGED -> PolicyProfile.SYSTEM  // MDM apps get system treatment
+        InstallClass.USER_INSTALLED -> PolicyProfile.USER
+    }
 
     // ══════════════════════════════════════════════════════════
     //  Finding classification
@@ -276,6 +340,24 @@ class TrustRiskModel @Inject constructor() {
      * even with low trust — it will stay INFO.
      */
     private val categoryClusterWhitelist: Map<AppCategoryDetector.AppCategory, Set<CapabilityCluster>> = mapOf(
+        // ── System categories: broad whitelists (these ARE the system) ──
+        AppCategoryDetector.AppCategory.SYSTEM_TELECOM to setOf(
+            CapabilityCluster.SMS, CapabilityCluster.CALL_LOG,
+            CapabilityCluster.NOTIFICATION_LISTENER, CapabilityCluster.BACKGROUND_LOCATION
+        ),
+        AppCategoryDetector.AppCategory.SYSTEM_MESSAGING to setOf(
+            CapabilityCluster.SMS
+        ),
+        AppCategoryDetector.AppCategory.SYSTEM_FRAMEWORK to setOf(
+            CapabilityCluster.OVERLAY, CapabilityCluster.ACCESSIBILITY,
+            CapabilityCluster.NOTIFICATION_LISTENER, CapabilityCluster.DEVICE_ADMIN,
+            CapabilityCluster.INSTALL_PACKAGES
+        ),
+        AppCategoryDetector.AppCategory.SYSTEM_CONNECTIVITY to setOf(
+            CapabilityCluster.VPN, CapabilityCluster.BACKGROUND_LOCATION
+        ),
+
+        // ── User categories: targeted whitelists ──
         // Phone/Dialer: SMS + call log is their job
         AppCategoryDetector.AppCategory.PHONE_DIALER to setOf(
             CapabilityCluster.SMS, CapabilityCluster.CALL_LOG
@@ -381,11 +463,19 @@ class TrustRiskModel @Inject constructor() {
         isSystemApp: Boolean,
         grantedPermissions: List<String> = emptyList(),
         appCategory: AppCategoryDetector.AppCategory = AppCategoryDetector.AppCategory.OTHER,
-        /** True if this app was first seen in the current scan (new install) */
+        /** True only for USER_INSTALLED apps that appeared since the last scan.
+         *  SYSTEM_PREINSTALLED apps that are "new to baseline" NEVER get this flag. */
         isNewApp: Boolean = false,
         /** Real enabled state of special access — null means legacy mode (manifest-only) */
-        specialAccessSnapshot: SpecialAccessInspector.SpecialAccessSnapshot? = null
+        specialAccessSnapshot: SpecialAccessInspector.SpecialAccessSnapshot? = null,
+        /** Install class — drives policy profile selection.  Defaults to USER_INSTALLED
+         *  for backward compatibility with existing call sites / tests. */
+        installClass: InstallClass = InstallClass.USER_INSTALLED,
+        /** Explicit policy profile override. If null, derived from installClass. */
+        policyProfileOverride: PolicyProfile? = null
     ): AppVerdict {
+        val policyProfile = policyProfileOverride ?: policyProfileFor(installClass)
+
         // ── Axis A: Trust tiers ──
         val isHighTrust = trustEvidence.trustScore >= 70
         val isModerateTrust = trustEvidence.trustScore in 40..69
@@ -460,9 +550,9 @@ class TrustRiskModel @Inject constructor() {
         val hasHighRiskPermAdded = rawFindings.any { it.type == FindingType.HIGH_RISK_PERMISSION_ADDED }
         val hasSurfaceIncrease = rawFindings.any { it.type == FindingType.EXPORTED_SURFACE_INCREASED }
 
-        // ── Adjust findings (trust-aware) ──
+        // ── Adjust findings (trust-aware + policy-profile-aware) ──
         val adjustedFindings = rawFindings.map { finding ->
-            adjustFinding(finding, trustEvidence)
+            adjustFinding(finding, trustEvidence, policyProfile)
         }
 
         // ── Compute numeric risk score ──
@@ -472,7 +562,7 @@ class TrustRiskModel @Inject constructor() {
         //  VERDICT DECISION — strict priority chain
         // ══════════════════════════════════════════════════════
 
-        // Step 1: Hard findings — ALWAYS CRITICAL (trust/category NEVER overrides)
+        // Step 1: Hard findings — ALWAYS CRITICAL (trust/category/policy NEVER overrides)
         val hasHardFindings = adjustedFindings.any {
             it.hardness == FindingHardness.HARD &&
             it.adjustedSeverity.score >= AppSecurityScanner.RiskLevel.MEDIUM.score
@@ -486,6 +576,7 @@ class TrustRiskModel @Inject constructor() {
 
         // Step 4: "Extra signals" — used for combo-gating of NEEDS_ATTENTION
         // A cluster alone is NOT enough. Need cluster + at least one extra signal.
+        // NOTE: isNewApp is ONLY true for USER_INSTALLED (never system preinstalled).
         val hasExtraSignal = hasBaselineDelta ||
                 isDefinitelySideloaded ||
                 isNewApp ||
@@ -503,8 +594,36 @@ class TrustRiskModel @Inject constructor() {
             )
         }
 
+        // ── R10 threshold: policy-profile-aware ──
+        // Instead of "any LOW finding → INFO", use weighted threshold.
+        // SYSTEM profile needs higher bar because hygiene findings are noise for system apps.
+        val meaningfulFindingWeight: Int = adjustedFindings.fold(0) { acc, f ->
+            acc + if (f.adjustedSeverity.score >= AppSecurityScanner.RiskLevel.LOW.score) {
+                when (f.hardness) {
+                    FindingHardness.HARD -> 10  // always meaningful
+                    FindingHardness.SOFT -> when (f.findingType) {
+                        // Hygiene findings: low weight for SYSTEM, normal for USER
+                        FindingType.OLD_TARGET_SDK -> if (policyProfile == PolicyProfile.SYSTEM) 0 else 3
+                        FindingType.OVER_PRIVILEGED -> if (policyProfile == PolicyProfile.SYSTEM) 0 else 3
+                        FindingType.EXPORTED_SURFACE_INCREASED -> if (policyProfile == PolicyProfile.SYSTEM) 1 else 3
+                        FindingType.INSTALLER_ANOMALY_VERIFIED -> if (policyProfile == PolicyProfile.SYSTEM) 0 else 2
+                        else -> 3
+                    }
+                    FindingHardness.WEAK_SIGNAL -> when (f.findingType) {
+                        FindingType.EXPORTED_COMPONENTS -> if (policyProfile == PolicyProfile.SYSTEM) 0 else 1
+                        FindingType.HIGH_RISK_CAPABILITY -> if (policyProfile == PolicyProfile.SYSTEM) 0 else 1
+                        else -> 1
+                    }
+                }
+            } else 0
+        }
+        val infoThreshold = when (policyProfile) {
+            PolicyProfile.SYSTEM -> 5   // System apps need real evidence to reach INFO
+            PolicyProfile.USER -> 1     // User apps: any finding with weight ≥ 1 → INFO
+        }
+
         val effectiveRisk = when {
-            // ── CRITICAL tier ──
+            // ── CRITICAL tier ── (policy profile NEVER suppresses)
             // R1: Hard findings → CRITICAL (debug cert, cert mismatch, hooking, etc.)
             hasHardFindings -> EffectiveRisk.CRITICAL
             // R2: Anomalous trust → CRITICAL
@@ -532,9 +651,10 @@ class TrustRiskModel @Inject constructor() {
             // R9: Has unexpected high-risk clusters but no extra signal → INFO
             //     "You have SMS access but nothing else suspicious" = just information
             hasUnexpectedHighRiskCluster && !isHighTrust -> EffectiveRisk.INFO
-            // R10: Any remaining soft/weak findings that survived downgrade → INFO
-            adjustedFindings.any { it.adjustedSeverity.score >= AppSecurityScanner.RiskLevel.LOW.score } ->
-                EffectiveRisk.INFO
+            // R10: Weighted threshold — replaces the old "any LOW → INFO" anti-pattern.
+            //      For USER profile: threshold=1 (essentially any finding).
+            //      For SYSTEM profile: threshold=5 (hygiene findings don't count).
+            meaningfulFindingWeight >= infoThreshold -> EffectiveRisk.INFO
 
             // ── SAFE tier ──
             // R11: Everything else (including expected clusters, privacy caps)
@@ -602,7 +722,8 @@ class TrustRiskModel @Inject constructor() {
 
     private fun adjustFinding(
         finding: RawFinding,
-        trust: TrustEvidenceEngine.TrustEvidence
+        trust: TrustEvidenceEngine.TrustEvidence,
+        policyProfile: PolicyProfile = PolicyProfile.USER
     ): AdjustedFinding {
         val hardness = finding.type.hardness
 
@@ -621,7 +742,7 @@ class TrustRiskModel @Inject constructor() {
         }
         val priority = basePriority + severityBonus
 
-        // HARD findings: NEVER downgrade, regardless of trust or category
+        // HARD findings: NEVER downgrade, regardless of trust, category, or policy
         if (hardness == FindingHardness.HARD) {
             return AdjustedFinding(
                 findingType = finding.type,
@@ -632,6 +753,28 @@ class TrustRiskModel @Inject constructor() {
                 title = finding.title,
                 explainPriority = priority
             )
+        }
+
+        // ── SYSTEM policy: aggressively suppress hygiene findings ──
+        if (policyProfile == PolicyProfile.SYSTEM) {
+            val isHygieneFinding = finding.type in setOf(
+                FindingType.OLD_TARGET_SDK,
+                FindingType.OVER_PRIVILEGED,
+                FindingType.EXPORTED_COMPONENTS,
+                FindingType.HIGH_RISK_CAPABILITY,
+                FindingType.INSTALLER_ANOMALY_VERIFIED
+            )
+            if (isHygieneFinding) {
+                return AdjustedFinding(
+                    findingType = finding.type,
+                    originalSeverity = finding.severity,
+                    adjustedSeverity = AppSecurityScanner.RiskLevel.NONE,
+                    hardness = hardness,
+                    wasDowngraded = true,
+                    title = finding.title,
+                    explainPriority = priority + 50  // Push to bottom
+                )
+            }
         }
 
         // WEAK_SIGNAL: downgrade aggressively for trusted apps

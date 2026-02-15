@@ -416,6 +416,32 @@ object AppCategoryDetector {
         val pkgLower = packageName.lowercase()
         
         return when {
+            // ── System-level categories (detected by well-known system package patterns) ──
+            // Telephony / Telecom framework
+            pkgLower.contains("telecom") || pkgLower.contains("telephony") ||
+            pkgLower == "com.android.phone" || pkgLower == "com.android.server.telecom" ||
+            pkgLower.contains("carrierservices") || pkgLower.contains("carrier") ||
+            pkgLower.contains("simappdiag") -> AppCategory.SYSTEM_TELECOM
+
+            // System messaging (built-in SMS/MMS)
+            pkgLower == "com.android.mms" || pkgLower == "com.google.android.apps.messaging" ||
+            pkgLower.contains("messaging") && pkgLower.startsWith("com.android") ||
+            pkgLower.contains("messaging") && pkgLower.startsWith("com.google.android") ->
+                AppCategory.SYSTEM_MESSAGING
+
+            // System UI / framework
+            pkgLower == "com.android.systemui" || pkgLower == "android" ||
+            pkgLower == "com.android.providers.settings" ||
+            pkgLower.contains("setupwizard") || pkgLower.contains("companiondevicemanager") ||
+            pkgLower.contains("permissioncontroller") || pkgLower.contains("packageinstaller") ->
+                AppCategory.SYSTEM_FRAMEWORK
+
+            // Connectivity stack (WiFi, Bluetooth, NFC, tethering)
+            pkgLower.contains("bluetooth") || pkgLower.contains("wifi") ||
+            pkgLower.contains("tethering") || pkgLower.contains("nfc") ||
+            pkgLower.contains("connectivity") || pkgLower.contains("networkstack") ->
+                AppCategory.SYSTEM_CONNECTIVITY
+
             // VPN apps
             pkgLower.contains("vpn") || nameLower.contains("vpn") ||
             pkgLower.contains("wireguard") || pkgLower.contains("openvpn") ||
@@ -502,6 +528,43 @@ object AppCategoryDetector {
      * Permissions listed here are NOT alarming for apps in that category.
      */
     enum class AppCategory(val label: String, val expectedPermissions: Set<String>) {
+        // ── System categories (ROM components) ──
+        SYSTEM_TELECOM("Telecom systém", setOf(
+            "android.permission.READ_CONTACTS", "android.permission.WRITE_CONTACTS",
+            "android.permission.READ_CALL_LOG", "android.permission.WRITE_CALL_LOG",
+            "android.permission.READ_SMS", "android.permission.SEND_SMS",
+            "android.permission.RECEIVE_SMS", "android.permission.CALL_PHONE",
+            "android.permission.RECORD_AUDIO", "android.permission.READ_PHONE_STATE",
+            "android.permission.PROCESS_OUTGOING_CALLS",
+            "android.permission.BIND_NOTIFICATION_LISTENER_SERVICE",
+            "android.permission.ACCESS_FINE_LOCATION",
+            "android.permission.ACCESS_BACKGROUND_LOCATION"
+        )),
+        SYSTEM_MESSAGING("Systémové zprávy", setOf(
+            "android.permission.READ_SMS", "android.permission.SEND_SMS",
+            "android.permission.RECEIVE_SMS", "android.permission.RECEIVE_MMS",
+            "android.permission.READ_CONTACTS", "android.permission.CAMERA",
+            "android.permission.ACCESS_FINE_LOCATION",
+            "android.permission.READ_EXTERNAL_STORAGE", "android.permission.WRITE_EXTERNAL_STORAGE"
+        )),
+        SYSTEM_FRAMEWORK("Systémový framework", setOf(
+            "android.permission.SYSTEM_ALERT_WINDOW",
+            "android.permission.BIND_ACCESSIBILITY_SERVICE",
+            "android.permission.BIND_NOTIFICATION_LISTENER_SERVICE",
+            "android.permission.BIND_DEVICE_ADMIN",
+            "android.permission.REQUEST_INSTALL_PACKAGES",
+            "android.permission.ACCESS_FINE_LOCATION",
+            "android.permission.CAMERA", "android.permission.RECORD_AUDIO"
+        )),
+        SYSTEM_CONNECTIVITY("Systémová konektivita", setOf(
+            "android.permission.ACCESS_FINE_LOCATION",
+            "android.permission.ACCESS_BACKGROUND_LOCATION",
+            "android.permission.ACCESS_WIFI_STATE", "android.permission.CHANGE_WIFI_STATE",
+            "android.permission.BLUETOOTH_CONNECT",
+            "android.permission.BIND_VPN_SERVICE"
+        )),
+
+        // ── User categories ──
         BANKING("Bankovnictví", setOf(
             "android.permission.CAMERA",  // QR codes, check deposit
             "android.permission.ACCESS_FINE_LOCATION",  // Branch finder

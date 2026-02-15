@@ -357,11 +357,17 @@ class AppSecurityScanner @Inject constructor(
     suspend fun scanAllApps(includeSystem: Boolean = false): List<AppSecurityReport> {
         val packages = getInstalledPackages()
         
+        // Pre-check: were system apps ever included in a previous scan?
+        // If not, system apps appearing as NEW are "new to baseline" (toggle),
+        // not genuinely new system components. We pass this flag to suppress
+        // false NEW_SYSTEM_APP anomalies.
+        val systemAppsWerePreviouslyScanned = baselineManager.hasSystemAppsInBaseline()
+        
         return packages
             .filter { includeSystem || !isSystemApp(it) }
             .mapNotNull { pkg -> 
                 try {
-                    analyzeApp(pkg)
+                    analyzeApp(pkg, systemAppsWerePreviouslyScanned)
                 } catch (e: Exception) {
                     null
                 }
@@ -371,9 +377,16 @@ class AppSecurityScanner @Inject constructor(
     
     /**
      * Analyze a single app with full trust evidence + baseline comparison
+     *
+     * @param systemAppsWerePreviouslyScanned if false, suppress NEW_SYSTEM_APP anomalies
+     *   for system-preinstalled apps (they're "new to baseline" because the user just
+     *   toggled system visibility, not because they were genuinely added to the system).
      */
     @SuppressLint("PackageManagerGetSignatures")
-    suspend fun analyzeApp(packageInfo: PackageInfo): AppSecurityReport {
+    suspend fun analyzeApp(
+        packageInfo: PackageInfo,
+        systemAppsWerePreviouslyScanned: Boolean = true
+    ): AppSecurityReport {
         val pm = context.packageManager
         val appInfo = packageInfo.applicationInfo
         
@@ -452,6 +465,14 @@ class AppSecurityScanner @Inject constructor(
         
         // Baseline anomalies → findings
         baselineComparison.anomalies.forEach { anomaly ->
+            // Suppress NEW_SYSTEM_APP for system-preinstalled apps when system apps
+            // were never scanned before (user just toggled system visibility).
+            if (anomaly.type == BaselineManager.AnomalyType.NEW_SYSTEM_APP
+                && scannedApp.isSystemApp
+                && !systemAppsWerePreviouslyScanned) {
+                return@forEach  // Skip — this is "new to baseline", not genuinely new
+            }
+
             val (findingType, severity) = when (anomaly.type) {
                 BaselineManager.AnomalyType.CERT_CHANGED -> 
                     TrustRiskModel.FindingType.BASELINE_SIGNATURE_CHANGE to RiskLevel.CRITICAL
@@ -720,6 +741,20 @@ class AppSecurityScanner @Inject constructor(
         // ── 4b. Special access inspection (real enabled state) ──
         val specialAccessSnapshot = specialAccessInspector.inspectApp(packageInfo.packageName)
 
+        // ── 4c. Classify install origin for policy profile ──
+        val installClass = trustRiskModel.classifyInstall(
+            isSystemApp = scannedApp.isSystemApp,
+            installerType = trustEvidence.installerInfo.installerType,
+            partition = trustEvidence.systemAppInfo.partition
+        )
+
+        // isNewApp: only true for USER_INSTALLED apps that are genuinely new since last scan.
+        // SYSTEM_PREINSTALLED appearing "new to baseline" (e.g., user toggled system visibility)
+        // are NEVER treated as new installs — they've been there since device setup.
+        val isNewInstall = installClass == TrustRiskModel.InstallClass.USER_INSTALLED
+                && baselineComparison.status == BaselineManager.BaselineStatus.NEW
+                && !baselineComparison.isFirstScan
+
         // ── 5. Produce verdict (Trust + Risk combined — 3-axis) ──
         val verdict = trustRiskModel.evaluate(
             packageName = packageInfo.packageName,
@@ -728,9 +763,9 @@ class AppSecurityScanner @Inject constructor(
             isSystemApp = scannedApp.isSystemApp,
             grantedPermissions = grantedPerms,
             appCategory = appCategory,
-            isNewApp = baselineComparison.status == BaselineManager.BaselineStatus.NEW
-                    && !baselineComparison.isFirstScan,
-            specialAccessSnapshot = specialAccessSnapshot
+            isNewApp = isNewInstall,
+            specialAccessSnapshot = specialAccessSnapshot,
+            installClass = installClass
         )
         
         // Overall risk — map 4-state verdict to RiskLevel for backward compat
@@ -1160,21 +1195,33 @@ class AppSecurityScanner @Inject constructor(
      * Get summary statistics for dashboard
      */
     fun getScanSummary(reports: List<AppSecurityReport>): ScanSummary {
-        // Use 4-state verdict for primary counts
-        val criticalApps = reports.count { it.verdict.effectiveRisk == TrustRiskModel.EffectiveRisk.CRITICAL }
-        val needsAttentionApps = reports.count { it.verdict.effectiveRisk == TrustRiskModel.EffectiveRisk.NEEDS_ATTENTION }
-        val infoApps = reports.count { it.verdict.effectiveRisk == TrustRiskModel.EffectiveRisk.INFO }
-        val safeApps = reports.count { it.verdict.effectiveRisk == TrustRiskModel.EffectiveRisk.SAFE }
+        val userReports = reports.filter { !it.app.isSystemApp }
+        val systemReports = reports.filter { it.app.isSystemApp }
+
+        // Use 4-state verdict for primary counts (USER only)
+        val criticalApps = userReports.count { it.verdict.effectiveRisk == TrustRiskModel.EffectiveRisk.CRITICAL }
+        val needsAttentionApps = userReports.count { it.verdict.effectiveRisk == TrustRiskModel.EffectiveRisk.NEEDS_ATTENTION }
+        val infoApps = userReports.count { it.verdict.effectiveRisk == TrustRiskModel.EffectiveRisk.INFO }
+        val safeApps = userReports.count { it.verdict.effectiveRisk == TrustRiskModel.EffectiveRisk.SAFE }
         
-        val totalIssues = reports.sumOf { it.issues.size }
-        val criticalIssues = reports.sumOf { r -> r.issues.count { it.severity == RiskLevel.CRITICAL } }
+        val totalIssues = userReports.sumOf { it.issues.size }
+        val criticalIssues = userReports.sumOf { r -> r.issues.count { it.severity == RiskLevel.CRITICAL } }
         
-        val appsWithOverPrivileged = reports.count { it.permissionAnalysis.isOverPrivileged }
-        val appsWithDebugCert = reports.count { it.signatureAnalysis.isDebugSigned }
-        val appsWithSuspiciousLibs = reports.count { it.nativeLibAnalysis.hasSuspiciousLibs }
+        val appsWithOverPrivileged = userReports.count { it.permissionAnalysis.isOverPrivileged }
+        val appsWithDebugCert = userReports.count { it.signatureAnalysis.isDebugSigned }
+        val appsWithSuspiciousLibs = userReports.count { it.nativeLibAnalysis.hasSuspiciousLibs }
+
+        // System app stats (separate aggregation)
+        val systemSummary = SystemAppsSummary(
+            totalSystemApps = systemReports.size,
+            criticalSystemApps = systemReports.count { it.verdict.effectiveRisk == TrustRiskModel.EffectiveRisk.CRITICAL },
+            needsAttentionSystemApps = systemReports.count { it.verdict.effectiveRisk == TrustRiskModel.EffectiveRisk.NEEDS_ATTENTION },
+            infoSystemApps = systemReports.count { it.verdict.effectiveRisk == TrustRiskModel.EffectiveRisk.INFO },
+            safeSystemApps = systemReports.count { it.verdict.effectiveRisk == TrustRiskModel.EffectiveRisk.SAFE }
+        )
         
         return ScanSummary(
-            totalAppsScanned = reports.size,
+            totalAppsScanned = userReports.size,
             criticalRiskApps = criticalApps,
             highRiskApps = needsAttentionApps,
             mediumRiskApps = infoApps,
@@ -1183,9 +1230,21 @@ class AppSecurityScanner @Inject constructor(
             criticalIssues = criticalIssues,
             overPrivilegedApps = appsWithOverPrivileged,
             debugSignedApps = appsWithDebugCert,
-            suspiciousNativeApps = appsWithSuspiciousLibs
+            suspiciousNativeApps = appsWithSuspiciousLibs,
+            systemAppsSummary = systemSummary
         )
     }
+
+    /**
+     * Aggregated summary for system apps — displayed in a separate section.
+     */
+    data class SystemAppsSummary(
+        val totalSystemApps: Int,
+        val criticalSystemApps: Int,
+        val needsAttentionSystemApps: Int,
+        val infoSystemApps: Int,
+        val safeSystemApps: Int
+    )
     
     data class ScanSummary(
         val totalAppsScanned: Int,
@@ -1197,7 +1256,9 @@ class AppSecurityScanner @Inject constructor(
         val criticalIssues: Int,
         val overPrivilegedApps: Int,
         val debugSignedApps: Int,
-        val suspiciousNativeApps: Int
+        val suspiciousNativeApps: Int,
+        /** System apps summary — null when system apps are not included */
+        val systemAppsSummary: SystemAppsSummary? = null
     ) {
         /**
          * Apps security score for the dashboard (0–100).

@@ -119,26 +119,31 @@ fun AppScanScreen(
                     }
                 }
                 else -> {
-                    val filteredReports = when (uiState.filter) {
-                        AppFilter.ALL -> uiState.reports
-                        AppFilter.CRITICAL -> uiState.reports.filter { 
+                    // Separate user apps and system apps
+                    val userReports = uiState.reports.filter { !it.app.isSystemApp }
+                    val systemReports = uiState.reports.filter { it.app.isSystemApp }
+
+                    val filteredUserReports = when (uiState.filter) {
+                        AppFilter.ALL -> userReports
+                        AppFilter.CRITICAL -> userReports.filter { 
                             it.verdict.effectiveRisk == TrustRiskModel.EffectiveRisk.CRITICAL 
                         }
-                        AppFilter.NEEDS_ATTENTION -> uiState.reports.filter { 
+                        AppFilter.NEEDS_ATTENTION -> userReports.filter { 
                             it.verdict.effectiveRisk == TrustRiskModel.EffectiveRisk.NEEDS_ATTENTION 
                         }
-                        AppFilter.INFO -> uiState.reports.filter { 
+                        AppFilter.INFO -> userReports.filter { 
                             it.verdict.effectiveRisk == TrustRiskModel.EffectiveRisk.INFO 
                         }
-                        AppFilter.SAFE -> uiState.reports.filter { 
+                        AppFilter.SAFE -> userReports.filter { 
                             it.verdict.effectiveRisk == TrustRiskModel.EffectiveRisk.SAFE 
                         }
                     }
                     
-                    Log.d(TAG, "LazyColumn: filteredReports=${filteredReports.size}, " +
-                        "first3=${filteredReports.take(3).map { it.app.appName }}")
+                    Log.d(TAG, "LazyColumn: userReports=${filteredUserReports.size}, " +
+                        "systemReports=${systemReports.size}, " +
+                        "first3=${filteredUserReports.take(3).map { it.app.appName }}")
                     
-                    if (filteredReports.isEmpty()) {
+                    if (filteredUserReports.isEmpty() && systemReports.isEmpty()) {
                         // Show empty filter state
                         Box(
                             modifier = Modifier
@@ -160,14 +165,68 @@ fun AppScanScreen(
                             contentPadding = PaddingValues(16.dp),
                             verticalArrangement = Arrangement.spacedBy(12.dp)
                         ) {
-                            items(
-                                items = filteredReports,
-                                key = { it.app.packageName }
-                            ) { report ->
-                                AppReportCard(
-                                    report = report,
-                                    onClick = { onNavigateToAppDetail(report.app.packageName) }
-                                )
+                            // ── User apps section ──
+                            if (filteredUserReports.isNotEmpty()) {
+                                items(
+                                    items = filteredUserReports,
+                                    key = { it.app.packageName }
+                                ) { report ->
+                                    AppReportCard(
+                                        report = report,
+                                        onClick = { onNavigateToAppDetail(report.app.packageName) }
+                                    )
+                                }
+                            } else if (userReports.isEmpty()) {
+                                item {
+                                    Text(
+                                        text = "Žádné uživatelské aplikace v tomto filtru",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.padding(vertical = 8.dp)
+                                    )
+                                }
+                            }
+
+                            // ── System apps section (only when system apps are included) ──
+                            if (systemReports.isNotEmpty() && uiState.includeSystemApps) {
+                                item {
+                                    SystemAppsSectionHeader(
+                                        systemReports = systemReports,
+                                        expanded = uiState.systemSectionExpanded,
+                                        onToggle = { viewModel.toggleSystemSection() }
+                                    )
+                                }
+                                
+                                if (uiState.systemSectionExpanded) {
+                                    // Show only top-N with highest risk, capped at 20
+                                    val topSystemApps = systemReports
+                                        .filter { 
+                                            it.verdict.effectiveRisk != TrustRiskModel.EffectiveRisk.SAFE 
+                                        }
+                                        .sortedByDescending { it.overallRisk.score }
+                                        .take(20)
+                                    
+                                    items(
+                                        items = topSystemApps,
+                                        key = { it.app.packageName }
+                                    ) { report ->
+                                        AppReportCard(
+                                            report = report,
+                                            onClick = { onNavigateToAppDetail(report.app.packageName) }
+                                        )
+                                    }
+                                    
+                                    if (topSystemApps.isEmpty()) {
+                                        item {
+                                            Text(
+                                                text = "✅ Žádné systémové komponenty s nálezy",
+                                                style = MaterialTheme.typography.bodyMedium,
+                                                color = Color(0xFF4CAF50),
+                                                modifier = Modifier.padding(vertical = 8.dp, horizontal = 4.dp)
+                                            )
+                                        }
+                                    }
+                                }
                             }
                             
                             item {
@@ -685,6 +744,77 @@ private fun AppReportCard(
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SystemAppsSectionHeader(
+    systemReports: List<AppSecurityReport>,
+    expanded: Boolean,
+    onToggle: () -> Unit
+) {
+    val critical = systemReports.count {
+        it.verdict.effectiveRisk == TrustRiskModel.EffectiveRisk.CRITICAL
+    }
+    val needsAttention = systemReports.count {
+        it.verdict.effectiveRisk == TrustRiskModel.EffectiveRisk.NEEDS_ATTENTION
+    }
+    val safe = systemReports.count {
+        it.verdict.effectiveRisk == TrustRiskModel.EffectiveRisk.SAFE
+    }
+    val info = systemReports.count {
+        it.verdict.effectiveRisk == TrustRiskModel.EffectiveRisk.INFO
+    }
+
+    val summaryParts = mutableListOf<String>()
+    if (critical > 0) summaryParts.add("🔴 $critical kritických")
+    if (needsAttention > 0) summaryParts.add("🟠 $needsAttention ke kontrole")
+    if (info > 0) summaryParts.add("ℹ️ $info info")
+    summaryParts.add("🟢 $safe bezpečných")
+    val summaryText = summaryParts.joinToString("  ·  ")
+
+    Card(
+        onClick = onToggle,
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+        ),
+        shape = RoundedCornerShape(12.dp)
+    ) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Icons.Default.PhoneAndroid,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        text = "Systémové komponenty (${systemReports.size})",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+                Icon(
+                    imageVector = if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                    contentDescription = if (expanded) "Sbalit" else "Rozbalit",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Spacer(Modifier.height(4.dp))
+            Text(
+                text = summaryText,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
         }
     }
 }

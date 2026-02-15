@@ -33,4 +33,7 @@ interface AppBaselineDao {
     
     @Query("SELECT COUNT(*) FROM app_baseline")
     suspend fun getBaselineCount(): Int
+
+    @Query("SELECT COUNT(*) FROM app_baseline WHERE isSystemApp = 1")
+    suspend fun getSystemAppBaselineCount(): Int
 }

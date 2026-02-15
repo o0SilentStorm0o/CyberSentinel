@@ -387,6 +387,16 @@ class BaselineManager @Inject constructor(
         return baselineDao.getBaselineCount() == 0
     }
 
+    /**
+     * Check if system apps have been scanned before.
+     * Returns true if there's at least one system app in the baseline.
+     * This is used to distinguish "system app new because user toggled system visibility"
+     * from "system app genuinely appeared (e.g., OTA update)".
+     */
+    suspend fun hasSystemAppsInBaseline(): Boolean {
+        return baselineDao.getSystemAppBaselineCount() > 0
+    }
+
     // ──────────────────────────────────────────────────────────
     //  Utility
     // ──────────────────────────────────────────────────────────

@@ -25,6 +25,7 @@ data class AppScanUiState(
     val summary: ScanSummary? = null,
     val filter: AppFilter = AppFilter.ALL,
     val includeSystemApps: Boolean = false,
+    val systemSectionExpanded: Boolean = false,
     val error: String? = null
 )
 
@@ -91,5 +92,9 @@ class AppScanViewModel @Inject constructor(
     fun toggleSystemApps() {
         _uiState.update { it.copy(includeSystemApps = !it.includeSystemApps) }
         startScan()
+    }
+    
+    fun toggleSystemSection() {
+        _uiState.update { it.copy(systemSectionExpanded = !it.systemSectionExpanded) }
     }
 }
