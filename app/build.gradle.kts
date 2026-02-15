@@ -25,6 +25,31 @@ android {
         versionCode = 1
         versionName = "1.0.0"
         vectorDrawables { useSupportLibrary = true }
+
+        // NDK: LLM inference is arm64-only (32-bit falls back to template engine)
+        ndk { abiFilters += listOf("arm64-v8a") }
+    }
+
+    // CMake build configuration for libllama_jni.so
+    // Enabled only when llama.cpp source tree is present (LLAMA_CPP_BUILD=true)
+    if (project.findProperty("LLAMA_CPP_BUILD") == "true") {
+        defaultConfig {
+            externalNativeBuild {
+                cmake {
+                    arguments(
+                        "-DLLAMA_CPP_DIR=${projectDir}/src/main/cpp/llama.cpp",
+                        "-DANDROID_STL=c++_shared"
+                    )
+                    cppFlags("-std=c++17", "-O3", "-ffunction-sections", "-fdata-sections")
+                }
+            }
+        }
+        externalNativeBuild {
+            cmake {
+                path = file("src/main/cpp/CMakeLists.txt")
+                version = "3.22.1"
+            }
+        }
     }
 
 

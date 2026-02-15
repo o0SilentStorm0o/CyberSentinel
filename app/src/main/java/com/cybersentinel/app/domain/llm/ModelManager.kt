@@ -3,6 +3,8 @@ package com.cybersentinel.app.domain.llm
 import java.io.File
 import java.io.InputStream
 import java.security.MessageDigest
+import javax.crypto.Mac
+import javax.crypto.spec.SecretKeySpec
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -68,6 +70,13 @@ class ModelManager @Inject constructor(
     ): ModelOperationResult {
         if (killSwitchActive) {
             return ModelOperationResult.Failure("Model is disabled by kill switch")
+        }
+
+        // ARM64 gate: never download on non-arm64 devices
+        if (manifest.requires64Bit && !LlamaCppRuntime.isArm64Device()) {
+            return ModelOperationResult.Failure(
+                "Model requires arm64-v8a but device does not support it"
+            )
         }
 
         if (currentState == ModelState.DOWNLOADING) {
@@ -267,6 +276,49 @@ class ModelManager @Inject constructor(
 
         /** Buffer size for SHA-256 computation (8 KB) */
         const val HASH_BUFFER_SIZE = 8192
+
+        /** HMAC algorithm for manifest signature verification */
+        const val HMAC_ALGORITHM = "HmacSHA256"
+    }
+
+    // ══════════════════════════════════════════════════════════
+    //  Manifest signature verification
+    // ══════════════════════════════════════════════════════════
+
+    /**
+     * Verify a model manifest's HMAC signature.
+     *
+     * The signature covers: modelId|version|sha256|downloadUrl
+     * Key is provided by the server / embedded in the app (for MVP).
+     *
+     * @param manifest The manifest to verify
+     * @param signature HMAC-SHA256 signature (hex string)
+     * @param key HMAC key
+     * @return true if signature is valid
+     */
+    fun verifyManifestSignature(
+        manifest: ModelManifest,
+        signature: String,
+        key: ByteArray
+    ): Boolean {
+        return try {
+            val payload = "${manifest.modelId}|${manifest.version}|${manifest.sha256}|${manifest.downloadUrl}"
+            val mac = Mac.getInstance(HMAC_ALGORITHM)
+            mac.init(SecretKeySpec(key, HMAC_ALGORITHM))
+            val expectedSignature = mac.doFinal(payload.toByteArray(Charsets.UTF_8))
+                .joinToString("") { "%02x".format(it) }
+            expectedSignature.equals(signature, ignoreCase = true)
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    /**
+     * Check if the current device supports the model's ABI requirements.
+     * Convenience wrapper around LlamaCppRuntime.isArm64Device().
+     */
+    fun isDeviceCompatible(manifest: ModelManifest): Boolean {
+        return !manifest.requires64Bit || LlamaCppRuntime.isArm64Device()
     }
 }
 
