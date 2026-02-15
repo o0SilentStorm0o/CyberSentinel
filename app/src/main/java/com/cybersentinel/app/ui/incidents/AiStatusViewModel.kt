@@ -40,7 +40,7 @@ class AiStatusViewModel @Inject constructor(
     private val orchestrator: ExplanationOrchestrator
 ) : ViewModel() {
 
-    private val _ui = MutableStateFlow(buildUiModel())
+    private val _ui = MutableStateFlow(AiStatusUiModel.INITIAL)
     val ui: StateFlow<AiStatusUiModel> = _ui.asStateFlow()
 
     /** Last self-test summary (if any) */

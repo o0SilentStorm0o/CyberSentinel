@@ -177,7 +177,28 @@ data class AiStatusUiModel(
     val isDownloading: Boolean = false,
     /** Benchmark metrics from last self-test, if available */
     val benchmarkMetrics: BenchmarkMetricsUi? = null
-)
+) {
+    companion object {
+        /** Safe initial state used before ViewModel finishes construction. */
+        val INITIAL = AiStatusUiModel(
+            modelStateLabel = "Načítání…",
+            tierLabel = "—",
+            llmAvailable = false,
+            gateReason = "Načítání…",
+            downloadProgress = null,
+            modelSizeMb = null,
+            availableStorageMb = null,
+            selfTestCompleted = false,
+            isProductionReady = null,
+            selfTestSummary = null,
+            killSwitchActive = false,
+            userLlmEnabled = true,
+            canDownload = false,
+            canRemove = false,
+            isSelfTesting = false
+        )
+    }
+}
 
 /**
  * User-facing benchmark metrics — only decision-relevant values.
