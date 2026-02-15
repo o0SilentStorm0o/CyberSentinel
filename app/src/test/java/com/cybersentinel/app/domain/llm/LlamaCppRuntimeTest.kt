@@ -4,7 +4,7 @@ import org.junit.Assert.*
 import org.junit.Test
 
 /**
- * Unit tests for LlamaCppRuntime — Sprint C2-2 + C2-2.5 + C2-2.6 + C2-2.7.
+ * Unit tests for LlamaCppRuntime — Sprint C2-2 + C2-2.5 + C2-2.6 + C2-2.7 + C2-2.8.
  *
  * Note: These tests run in JVM (not on device), so:
  *  - No actual JNI calls (UnsatisfiedLinkError expected)
@@ -12,6 +12,7 @@ import org.junit.Test
  *  - Tests focus on: ABI gating, unloaded state behavior, contract compliance,
  *    cancel support, timeout grace, cooldown, single-flight, JNI output parsing
  *  - C2-2.7: TTFT validation, token count validation, MAX_TTFT_MS, MAX_TOKEN_COUNT
+ *  - C2-2.8: ERR| prefix rejection, null tokenCount fallback semantics
  *
  * On-device/instrumented tests are in LlmPipelineSmokeTest (androidTest).
  */
@@ -307,7 +308,7 @@ class LlamaCppRuntimeTest {
         // 1_000_000 > 999_999 → fallback to raw text
         val parsed = runtime.parseJniOutput("1000000|10|{\"data\":true}")
         assertEquals("1000000|10|{\"data\":true}", parsed.text)
-        assertEquals(0, parsed.tokenCount)
+        assertNull("Fallback should have null tokenCount", parsed.tokenCount)
         assertNull(parsed.ttftMs)
     }
 
@@ -340,18 +341,18 @@ class LlamaCppRuntimeTest {
     }
 
     @Test
-    fun `parseJniOutput fallback returns tokenCount 0`() {
+    fun `parseJniOutput fallback returns tokenCount null`() {
         val runtime = LlamaCppRuntime.createUnloaded()
-        // Invalid prefix → fallback → tokenCount should be 0 (not a length estimate)
+        // Invalid prefix → fallback → tokenCount should be null (C2-2.8: "we don't know")
         val parsed = runtime.parseJniOutput("not_a_number|some text")
-        assertEquals(0, parsed.tokenCount)
+        assertNull("Fallback should have null tokenCount", parsed.tokenCount)
     }
 
     @Test
-    fun `parseJniOutput empty input returns tokenCount 0`() {
+    fun `parseJniOutput empty input returns tokenCount null`() {
         val runtime = LlamaCppRuntime.createUnloaded()
         val parsed = runtime.parseJniOutput("")
-        assertEquals(0, parsed.tokenCount)
+        assertNull("Empty input should have null tokenCount", parsed.tokenCount)
     }
 
     @Test
@@ -385,5 +386,68 @@ class LlamaCppRuntimeTest {
     fun `InferenceResult success tokensPerSecond null when tokensGenerated null`() {
         val result = InferenceResult.success("output", totalTimeMs = 100)
         assertNull("tokensPerSecond should be null when tokensGenerated is null", result.tokensPerSecond)
+    }
+
+    // ══════════════════════════════════════════════════════════
+    //  C2-2.8: ERR| prefix rejection in parseJniOutput
+    // ══════════════════════════════════════════════════════════
+
+    @Test
+    fun `parseJniOutput rejects ERR pipe prefix`() {
+        val runtime = LlamaCppRuntime.createUnloaded()
+        val parsed = runtime.parseJniOutput("ERR|NULL_HANDLE|null handle")
+        assertEquals("ERR|NULL_HANDLE|null handle", parsed.text)
+        assertNull("ERR| prefix should produce null tokenCount", parsed.tokenCount)
+        assertNull("ERR| prefix should produce null ttftMs", parsed.ttftMs)
+    }
+
+    @Test
+    fun `parseJniOutput rejects ERR prefix with different codes`() {
+        val runtime = LlamaCppRuntime.createUnloaded()
+        val codes = listOf(
+            "ERR|STALE_HANDLE|invalid or expired handle",
+            "ERR|POISONED|session has been unloaded",
+            "ERR|NULL_CTX|model or context is null",
+            "ERR|NULL_PROMPT|null prompt",
+            "ERR|TOKENIZE|tokenization failed",
+            "ERR|CTX_OVERFLOW|prompt exceeds context window",
+            "ERR|DECODE|prompt decode failed"
+        )
+        for (errStr in codes) {
+            val parsed = runtime.parseJniOutput(errStr)
+            assertEquals("Raw text preserved for: $errStr", errStr, parsed.text)
+            assertNull("tokenCount null for: $errStr", parsed.tokenCount)
+            assertNull("ttftMs null for: $errStr", parsed.ttftMs)
+        }
+    }
+
+    @Test
+    fun `parseJniOutput rejects ERROR colon prefix for backward compat`() {
+        val runtime = LlamaCppRuntime.createUnloaded()
+        val parsed = runtime.parseJniOutput("ERROR: something went wrong")
+        assertEquals("ERROR: something went wrong", parsed.text)
+        assertNull("ERROR: prefix should produce null tokenCount", parsed.tokenCount)
+        assertNull("ERROR: prefix should produce null ttftMs", parsed.ttftMs)
+    }
+
+    @Test
+    fun `parseJniOutput valid output still parses after ERR guard`() {
+        val runtime = LlamaCppRuntime.createUnloaded()
+        // Normal output should not be affected by ERR| guard
+        val parsed = runtime.parseJniOutput("42|250|{\"severity\":\"HIGH\"}")
+        assertEquals("{\"severity\":\"HIGH\"}", parsed.text)
+        assertEquals(42, parsed.tokenCount)
+        assertEquals(250L, parsed.ttftMs)
+    }
+
+    @Test
+    fun `parseJniOutput ERR without pipe is not rejected by ERR guard`() {
+        val runtime = LlamaCppRuntime.createUnloaded()
+        // "ERR" alone (no pipe) is not an error prefix — goes to normal parsing
+        // This won't match "ERR|" or "ERROR:" so falls through to normal parse
+        val parsed = runtime.parseJniOutput("ERR something")
+        // No pipe found → fallback
+        assertEquals("ERR something", parsed.text)
+        assertNull("No-pipe fallback should have null tokenCount", parsed.tokenCount)
     }
 }

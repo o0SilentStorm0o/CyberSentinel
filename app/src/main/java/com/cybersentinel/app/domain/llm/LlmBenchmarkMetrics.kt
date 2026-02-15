@@ -80,18 +80,28 @@ data class LlmBenchmarkResult(
     val durationMs: Long get() = completedAt - startedAt
 
     /**
-     * C2-2.7: Production readiness gate.
+     * C2-2.7 + C2-2.8: Production readiness gate.
      * A model is production-ready when:
      *  1. stopFailureRate ≤ MAX_STOP_FAILURE_RATE (default 2%) — stop condition works
      *  2. healthScore ≥ MIN_HEALTH_SCORE (default 70%) — overall quality is acceptable
-     *  3. At least MIN_RUNS runs completed — statistical significance
+     *  3. At least MIN_PRODUCTION_RUNS runs completed — statistical significance
+     *  4. schemaComplianceRate ≥ MIN_STRICT_PASS_RATE (85%) — safety guardrail (C2-2.8)
+     *  5. policyViolationRate ≤ MAX_POLICY_VIOLATION_RATE (1%) — safety guardrail (C2-2.8)
      *
      * This is the primary go/no-go signal for deploying a model to production.
      */
     val isProductionReady: Boolean
-        get() = totalRuns >= MIN_PRODUCTION_RUNS &&
-                stopFailureRate <= MAX_STOP_FAILURE_RATE &&
-                healthScore >= MIN_HEALTH_SCORE
+        get() {
+            if (totalRuns < MIN_PRODUCTION_RUNS) return false
+            if (stopFailureRate > MAX_STOP_FAILURE_RATE) return false
+            if (healthScore < MIN_HEALTH_SCORE) return false
+            // C2-2.8: safety guardrails
+            if (quality.schemaComplianceRate < MIN_STRICT_PASS_RATE) return false
+            val violationRate = if (totalRuns > 0)
+                quality.policyViolationCount.toFloat() / totalRuns else 0f
+            if (violationRate > MAX_POLICY_VIOLATION_RATE) return false
+            return true
+        }
 
     /** Overall health score (0.0 - 1.0): weighted combination of key metrics */
     val healthScore: Float
@@ -125,7 +135,7 @@ data class LlmBenchmarkResult(
                 appendLine("Peak native heap: ${peakNativeHeapBytes / (1024 * 1024)}MB")
             }
             if (stability.busyCount > 0) {
-                appendLine("ℹ️ Busy (single-flight): ${stability.busyCount}")
+                appendLine("ℹ️ Busy (single-flight): ${stability.busyCount} (${"%.1f".format(stability.busyRate * 100)}%)")
             }
             if (stability.oomCount > 0) appendLine("⚠️ OOM: ${stability.oomCount}")
             if (stability.timeoutCount > 0) appendLine("⚠️ Timeouts: ${stability.timeoutCount}")
@@ -139,6 +149,10 @@ data class LlmBenchmarkResult(
         const val MIN_HEALTH_SCORE = 0.70f
         /** C2-2.7: Minimum number of benchmark runs for production gate */
         const val MIN_PRODUCTION_RUNS = 10
+        /** C2-2.8: Minimum schema compliance rate for production safety (85%) */
+        const val MIN_STRICT_PASS_RATE = 0.85f
+        /** C2-2.8: Maximum acceptable policy violation rate (1%) */
+        const val MAX_POLICY_VIOLATION_RATE = 0.01f
     }
 }
 
@@ -228,6 +242,14 @@ data class StabilityMetrics(
 
     /** Real error count (excludes busy) */
     val realErrorCount: Int get() = oomCount + timeoutCount + otherErrorCount
+
+    /**
+     * C2-2.8: Busy rate (0.0 - 1.0) — ratio of busy rejections to total calls.
+     * If this is high (> 5%), it means the UI is generating excessive parallel
+     * inference requests (rapid clicks, recomposition, multiple screens).
+     */
+    val busyRate: Float
+        get() = if (totalCalls > 0) busyCount.toFloat() / totalCalls else 0f
 
     companion object {
         val EMPTY = StabilityMetrics(0, 0, 0, 0, 0, 0)

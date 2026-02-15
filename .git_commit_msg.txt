@@ -1,0 +1,31 @@
+C2-2.8: Production hardening — running guard, overflow guard, ERR| format, null fallback, stricter gate
+
+JNI (llama_jni.cpp):
+- Running guard: std::atomic<bool> running + InferenceGuard RAII on LlamaSession
+  - nativeUnload spin-waits 300ms on running==false before freeing ctx/model
+  - Intentional leak on timeout (leak > crash)
+  - Double-check poisoned after InferenceGuard for edge race
+- Generation/slot overflow guard: refuse load if ++gen==0 || ++slot==0
+- ERR|CODE|message format for all 8 JNI error return paths
+  (NULL_HANDLE, STALE_HANDLE, POISONED, NULL_CTX, NULL_PROMPT,
+   TOKENIZE, CTX_OVERFLOW, DECODE)
+- #include <thread> for std::this_thread::sleep_for
+
+Kotlin (LlamaCppRuntime.kt):
+- JniParsedOutput.tokenCount: Int → Int? (null = "we don't know")
+- parseJniOutput: ERR| and ERROR: prefix rejected before metric parsing
+- All fallback returns now tokenCount=null (was 0)
+- runInference: checks both ERR| and ERROR: prefix
+
+Metrics (LlmBenchmarkMetrics.kt):
+- StabilityMetrics.busyRate: Float computed property
+- isProductionReady: +2 gates (schemaComplianceRate >= 85%, policyViolationRate <= 1%)
+- New constants: MIN_STRICT_PASS_RATE=0.85, MAX_POLICY_VIOLATION_RATE=0.01
+- Summary busy line includes busyRate percentage
+
+Tests: 552 → 569 (+17 new, 3 fixed regressions)
+- ERR| prefix rejection (5 tests): various error codes, ERROR: compat, valid still parses
+- busyRate computed property (4 tests): zero, correct ratio, edge cases
+- C2-2.8 constants (1 test): MIN_STRICT_PASS_RATE, MAX_POLICY_VIOLATION_RATE
+- isProductionReady new gates (5 tests): low compliance, boundary 84%, violations, exact threshold
+- Summary busyRate (2 tests): percentage present, absent when zero

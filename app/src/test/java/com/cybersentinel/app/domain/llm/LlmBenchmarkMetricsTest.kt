@@ -4,11 +4,12 @@ import org.junit.Assert.*
 import org.junit.Test
 
 /**
- * Unit tests for LlmBenchmarkMetrics data classes — C2-2.5 + C2-2.7.
+ * Unit tests for LlmBenchmarkMetrics data classes — C2-2.5 + C2-2.7 + C2-2.8.
  *
  * Verifies: computed properties, edge cases, companion object factories.
  * C2-2.5: LatencyMetrics now includes p99Ms, LlmBenchmarkResult includes peakNativeHeapBytes.
  * C2-2.7: StabilityMetrics.busyCount, stopFailureRate, isProductionReady gate.
+ * C2-2.8: busyRate, MIN_STRICT_PASS_RATE, MAX_POLICY_VIOLATION_RATE, stricter gate.
  */
 class LlmBenchmarkMetricsTest {
 
@@ -543,5 +544,188 @@ class LlmBenchmarkMetricsTest {
             completedAt = 0
         )
         assertTrue("Summary should mention Busy", result.summary.contains("Busy"))
+    }
+
+    // ══════════════════════════════════════════════════════════
+    //  C2-2.8: busyRate computed property
+    // ══════════════════════════════════════════════════════════
+
+    @Test
+    fun `busyRate is zero when no calls`() {
+        val metrics = StabilityMetrics.EMPTY
+        assertEquals(0f, metrics.busyRate, 0.0001f)
+    }
+
+    @Test
+    fun `busyRate is zero when no busy rejections`() {
+        val metrics = StabilityMetrics(20, 20, 0, 0, 0, busyCount = 0)
+        assertEquals(0f, metrics.busyRate, 0.0001f)
+    }
+
+    @Test
+    fun `busyRate correct ratio`() {
+        val metrics = StabilityMetrics(100, 90, 2, 1, 2, busyCount = 5)
+        assertEquals(0.05f, metrics.busyRate, 0.0001f)
+    }
+
+    @Test
+    fun `busyRate 100 percent when all calls busy`() {
+        val metrics = StabilityMetrics(10, 0, 0, 0, 0, busyCount = 10)
+        assertEquals(1.0f, metrics.busyRate, 0.0001f)
+    }
+
+    // ══════════════════════════════════════════════════════════
+    //  C2-2.8: companion constants
+    // ══════════════════════════════════════════════════════════
+
+    @Test
+    fun `C2-2-8 companion constants have expected values`() {
+        assertEquals(0.85f, LlmBenchmarkResult.MIN_STRICT_PASS_RATE, 0.0001f)
+        assertEquals(0.01f, LlmBenchmarkResult.MAX_POLICY_VIOLATION_RATE, 0.0001f)
+    }
+
+    // ══════════════════════════════════════════════════════════
+    //  C2-2.8: isProductionReady — new gates
+    // ══════════════════════════════════════════════════════════
+
+    @Test
+    fun `isProductionReady false when schemaComplianceRate below threshold`() {
+        val result = LlmBenchmarkResult(
+            modelId = "test",
+            modelVersion = "1.0",
+            runtimeId = "fake",
+            totalRuns = 20,
+            latency = LatencyMetrics(100, 50, 200, 100, 180, 190, 30, 10f),
+            stability = StabilityMetrics(20, 20, 0, 0, 0),
+            quality = QualityMetrics(0.50f, 0.9f, 0, 0.8, 0, 0),  // 50% < 85% threshold
+            pipeline = PipelineMetrics(1f, 1f, 0.9f, 0.1f, 0.1f),
+            inferenceConfig = InferenceConfig.SLOTS_DEFAULT,
+            startedAt = 0,
+            completedAt = 1000,
+            stopFailureRate = 0f
+        )
+        assertFalse("Should NOT be ready with 50% compliance (< 85%)", result.isProductionReady)
+    }
+
+    @Test
+    fun `isProductionReady false when schemaComplianceRate at 84 percent`() {
+        val result = LlmBenchmarkResult(
+            modelId = "test",
+            modelVersion = "1.0",
+            runtimeId = "fake",
+            totalRuns = 20,
+            latency = LatencyMetrics(100, 50, 200, 100, 180, 190, 30, 10f),
+            stability = StabilityMetrics(20, 20, 0, 0, 0),
+            quality = QualityMetrics(0.84f, 0.9f, 0, 0.8, 0, 0),  // 84% < 85%
+            pipeline = PipelineMetrics(1f, 1f, 0.9f, 0.1f, 0.1f),
+            inferenceConfig = InferenceConfig.SLOTS_DEFAULT,
+            startedAt = 0,
+            completedAt = 1000,
+            stopFailureRate = 0f
+        )
+        assertFalse("Should NOT be ready at 84% compliance", result.isProductionReady)
+    }
+
+    @Test
+    fun `isProductionReady false when policyViolationRate above threshold`() {
+        val result = LlmBenchmarkResult(
+            modelId = "test",
+            modelVersion = "1.0",
+            runtimeId = "fake",
+            totalRuns = 20,
+            latency = LatencyMetrics(100, 50, 200, 100, 180, 190, 30, 10f),
+            stability = StabilityMetrics(20, 20, 0, 0, 0),
+            quality = QualityMetrics(0.95f, 0.9f, 5, 0.8, 0, 0),  // 5/20 = 25% > 1%
+            pipeline = PipelineMetrics(1f, 1f, 0.9f, 0.1f, 0.1f),
+            inferenceConfig = InferenceConfig.SLOTS_DEFAULT,
+            startedAt = 0,
+            completedAt = 1000,
+            stopFailureRate = 0f
+        )
+        assertFalse("Should NOT be ready with 25% policy violations (> 1%)", result.isProductionReady)
+    }
+
+    @Test
+    fun `isProductionReady false when exactly 1 violation over threshold`() {
+        // 1 violation in 20 runs = 5% > 1%
+        val result = LlmBenchmarkResult(
+            modelId = "test",
+            modelVersion = "1.0",
+            runtimeId = "fake",
+            totalRuns = 20,
+            latency = LatencyMetrics(100, 50, 200, 100, 180, 190, 30, 10f),
+            stability = StabilityMetrics(20, 20, 0, 0, 0),
+            quality = QualityMetrics(0.95f, 0.9f, 1, 0.8, 0, 0),  // 1/20 = 5% > 1%
+            pipeline = PipelineMetrics(1f, 1f, 0.9f, 0.1f, 0.1f),
+            inferenceConfig = InferenceConfig.SLOTS_DEFAULT,
+            startedAt = 0,
+            completedAt = 1000,
+            stopFailureRate = 0f
+        )
+        assertFalse("Should NOT be ready with 1 violation in 20 runs (5% > 1%)", result.isProductionReady)
+    }
+
+    @Test
+    fun `isProductionReady true at exact thresholds`() {
+        // 85% compliance, 0 violations → should pass
+        val result = LlmBenchmarkResult(
+            modelId = "test",
+            modelVersion = "1.0",
+            runtimeId = "fake",
+            totalRuns = 20,
+            latency = LatencyMetrics(100, 50, 200, 100, 180, 190, 30, 10f),
+            stability = StabilityMetrics(20, 20, 0, 0, 0),
+            quality = QualityMetrics(0.85f, 0.9f, 0, 0.8, 0, 0),  // exactly 85%
+            pipeline = PipelineMetrics(1f, 1f, 0.9f, 0.1f, 0.1f),
+            inferenceConfig = InferenceConfig.SLOTS_DEFAULT,
+            startedAt = 0,
+            completedAt = 1000,
+            stopFailureRate = 0f
+        )
+        assertTrue("Should be ready at exactly 85% compliance + 0 violations", result.isProductionReady)
+    }
+
+    // ══════════════════════════════════════════════════════════
+    //  C2-2.8: summary contains busyRate percentage
+    // ══════════════════════════════════════════════════════════
+
+    @Test
+    fun `summary contains busyRate percentage`() {
+        val result = LlmBenchmarkResult(
+            modelId = "test",
+            modelVersion = "1.0",
+            runtimeId = "fake",
+            totalRuns = 10,
+            latency = LatencyMetrics.EMPTY,
+            stability = StabilityMetrics(10, 8, 0, 0, 0, busyCount = 2),
+            quality = QualityMetrics.EMPTY,
+            pipeline = PipelineMetrics.EMPTY,
+            inferenceConfig = InferenceConfig.SLOTS_DEFAULT,
+            startedAt = 0,
+            completedAt = 0
+        )
+        // busyRate = 2/10 = 20% — summary should contain the busy line with a percent sign
+        val busyLine = result.summary.lines().find { it.contains("Busy") }
+        assertNotNull("Summary should have a Busy line", busyLine)
+        assertTrue("Busy line should contain %", busyLine!!.contains("%"))
+        assertTrue("Busy line should contain count 2", busyLine.contains("2"))
+    }
+
+    @Test
+    fun `summary does not contain busy line when busyCount zero`() {
+        val result = LlmBenchmarkResult(
+            modelId = "test",
+            modelVersion = "1.0",
+            runtimeId = "fake",
+            totalRuns = 10,
+            latency = LatencyMetrics.EMPTY,
+            stability = StabilityMetrics(10, 10, 0, 0, 0, busyCount = 0),
+            quality = QualityMetrics.EMPTY,
+            pipeline = PipelineMetrics.EMPTY,
+            inferenceConfig = InferenceConfig.SLOTS_DEFAULT,
+            startedAt = 0,
+            completedAt = 0
+        )
+        assertFalse("Summary should NOT mention Busy when count is 0", result.summary.contains("Busy"))
     }
 }

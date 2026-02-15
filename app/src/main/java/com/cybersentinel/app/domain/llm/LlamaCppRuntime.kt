@@ -38,6 +38,15 @@ import java.util.concurrent.locks.ReentrantLock
  *  - **TTFT validation**: TTFT > 120s treated as invalid → null (prevents garbage metrics).
  *  - **Token count validation**: tokenCount > MAX_TOKEN_COUNT treated as invalid → fallback.
  *
+ * C2-2.8 hardening:
+ *  - **Running guard in C++**: atomic `running` flag + RAII InferenceGuard.
+ *    nativeUnload waits up to 300ms for running==false before freeing ctx/model.
+ *    If timeout, ctx/model are NOT freed (leak beats crash).
+ *  - **Structured JNI errors**: all C++ errors use "ERR|CODE|message" format.
+ *    Kotlin rejects ERR| prefix before parsing metrics. Eliminates silent degradation.
+ *  - **Null tokenCount fallback**: unparseable JNI output returns tokenCount=null
+ *    (not 0). null = "we don't know". Aligns with InferenceResult three-state semantics.
+ *
  * Contract:
  *  - ARM64-only: `isAvailable` returns false on non-arm64 devices.
  *  - Single-flight: only one inference at a time; concurrent calls get BUSY error.
@@ -150,7 +159,9 @@ class LlamaCppRuntime private constructor(
                 return InferenceResult.failure("Empty output from native inference", totalTime)
             }
 
-            if (rawOutput.startsWith("ERROR:")) {
+            // C2-2.8: structured JNI error format: "ERR|CODE|message"
+            // Also keep backward compat with legacy "ERROR:" prefix
+            if (rawOutput.startsWith("ERR|") || rawOutput.startsWith("ERROR:")) {
                 return InferenceResult.failure(rawOutput, totalTime)
             }
 
@@ -227,10 +238,13 @@ class LlamaCppRuntime private constructor(
 
     /**
      * Parsed JNI output — structured result from "TOKEN_COUNT|TTFT_MS|text".
+     *
+     * C2-2.8: tokenCount is Int? — null means "we don't know" (unparseable JNI output
+     * or error string). 0 means "inference ran but produced no usable tokens".
      */
     internal data class JniParsedOutput(
         val text: String,
-        val tokenCount: Int,
+        val tokenCount: Int?,
         val ttftMs: Long?
     )
 
@@ -246,24 +260,34 @@ class LlamaCppRuntime private constructor(
      * C2-2.7 validation:
      *  - Token count > MAX_TOKEN_COUNT → treat as corrupt, fallback to raw text.
      *  - TTFT > MAX_TTFT_MS → treat as measurement error, set ttftMs to null.
+     *
+     * C2-2.8 changes:
+     *  - ERR| / ERROR: prefix → rejected immediately, returns (raw, null, null).
+     *  - Fallback tokenCount is null (was 0). null = "we don't know".
+     *    0 means "inference ran but produced nothing usable".
      */
     internal fun parseJniOutput(raw: String): JniParsedOutput {
+        // C2-2.8: structured error prefix — never parse as metrics
+        if (raw.startsWith("ERR|") || raw.startsWith("ERROR:")) {
+            return JniParsedOutput(raw, null, null)
+        }
+
         val firstPipe = raw.indexOf('|')
         if (firstPipe <= 0 || firstPipe > MAX_PREFIX_LEN) {
-            return JniParsedOutput(raw, 0, null)
+            return JniParsedOutput(raw, null, null)
         }
 
         val countStr = raw.substring(0, firstPipe)
         if (!countStr.all { it.isDigit() }) {
-            return JniParsedOutput(raw, 0, null)
+            return JniParsedOutput(raw, null, null)
         }
 
         val tokenCount = countStr.toIntOrNull()
-            ?: return JniParsedOutput(raw, 0, null)
+            ?: return JniParsedOutput(raw, null, null)
 
         // C2-2.7: reject implausibly large token counts
         if (tokenCount > MAX_TOKEN_COUNT) {
-            return JniParsedOutput(raw, 0, null)
+            return JniParsedOutput(raw, null, null)
         }
 
         // Try C2-2.6 extended format: "TOKEN_COUNT|TTFT_MS|text"

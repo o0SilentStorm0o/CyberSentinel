@@ -8,7 +8,7 @@
  *   3. nativeUnload          — free model + context
  *   4. nativeCancelInference — cooperative cancel via atomic flag
  *
- * Design decisions (C2-2.5 + C2-2.6 + C2-2.7 hardening):
+ * Design decisions (C2-2.5 + C2-2.6 + C2-2.7 + C2-2.8 hardening):
  *   - Static link ggml + llama.cpp (no separate .so for ggml)
  *   - CPU-only inference (no Vulkan/NNAPI in C2-2; future C2-4)
  *   - Hard n_ctx ceiling (2048 default — slots-only prompts are short)
@@ -24,11 +24,17 @@
  *     unordered_map<uint64_t, shared_ptr<LlamaSession>> + mutex.
  *     nativeUnload erases the handle from the map; shared_ptr ensures the
  *     session memory is freed only after all in-flight references are released.
+ *   - **Running guard** (C2-2.8): atomic<bool> `running` flag + RAII InferenceGuard.
+ *     nativeUnload spin-waits on `running == false` (max 300ms) before freeing
+ *     ctx/model. If timeout: ctx/model are NOT freed (leak beats crash).
  *   - Single model context per handle (no batched inference)
  *   - LlamaSession struct owns model+context+cancel+poisoned atomically
  *
  * Return format: "TOKEN_COUNT|TTFT_MS|generated_text"
  *   Kotlin side splits on first two '|' to get exact token count and TTFT.
+ *
+ * Error format (C2-2.8): "ERR|CODE|human_message"
+ *   Kotlin rejects ERR| prefix before metric parsing — prevents silent degradation.
  *
  * Build: Via CMakeLists.txt → libllama_jni.so (arm64-v8a only)
  *
@@ -45,6 +51,7 @@
 #include <mutex>
 #include <memory>
 #include <unordered_map>
+#include <thread>
 #include <android/log.h>
 
 // llama.cpp headers (paths resolved by CMake include_directories)
@@ -75,6 +82,23 @@ struct LlamaSession {
     int                n_threads   = 4;
     std::atomic<bool>  cancel_flag{false};  // cooperative cancel — checked every token
     std::atomic<bool>  poisoned{false};     // set after unload — prevents reuse
+    std::atomic<bool>  running{false};      // C2-2.8: true while inference is in progress
+};
+
+/**
+ * RAII guard: sets session->running = true on construction, false on destruction.
+ * Ensures running flag is always cleared even if inference throws or returns early.
+ */
+struct InferenceGuard {
+    std::shared_ptr<LlamaSession> session;
+    explicit InferenceGuard(std::shared_ptr<LlamaSession> s) : session(std::move(s)) {
+        if (session) session->running.store(true, std::memory_order_release);
+    }
+    ~InferenceGuard() {
+        if (session) session->running.store(false, std::memory_order_release);
+    }
+    InferenceGuard(const InferenceGuard&) = delete;
+    InferenceGuard& operator=(const InferenceGuard&) = delete;
 };
 
 // ══════════════════════════════════════════════════════════
@@ -105,6 +129,16 @@ static uint64_t registry_insert(std::shared_ptr<LlamaSession> session) {
     std::lock_guard<std::mutex> lock(g_registry_mutex);
     uint32_t gen = ++g_generation;
     uint32_t slot = ++g_slot;
+
+    // C2-2.8: overflow guard — if either counter wraps to 0, refuse the insert.
+    // 2^32 loads is ~unlikely in practice, but a long-running process with a bug
+    // (leak loop) could hit it. Fail-safe: refuse load rather than risk handle collision.
+    if (gen == 0 || slot == 0) {
+        LOGE("registry_insert: generation/slot counter overflow — refusing load "
+             "(gen=%u, slot=%u). Restart app to reset.", gen, slot);
+        return 0;
+    }
+
     uint64_t handle = (static_cast<uint64_t>(gen) << 32) | static_cast<uint64_t>(slot);
     g_registry[handle] = std::move(session);
     return handle;
@@ -284,21 +318,31 @@ Java_com_cybersentinel_app_domain_llm_LlamaCppRuntime_nativeRunInference(
     jlong   timeoutMs
 ) {
     if (handle == 0) {
-        return env->NewStringUTF("ERROR: null handle");
+        return env->NewStringUTF("ERR|NULL_HANDLE|null handle");
     }
 
     // C2-2.7: look up session via generational handle registry
     auto session = registry_lookup(static_cast<uint64_t>(handle));
     if (!session) {
-        return env->NewStringUTF("ERROR: invalid or expired handle (session not found in registry)");
+        return env->NewStringUTF("ERR|STALE_HANDLE|invalid or expired handle (session not found in registry)");
     }
 
     // C2-2.6: poisoned handle guard — prevents use-after-free race
     if (session->poisoned.load(std::memory_order_acquire)) {
-        return env->NewStringUTF("ERROR: session has been unloaded (poisoned handle)");
+        return env->NewStringUTF("ERR|POISONED|session has been unloaded (poisoned handle)");
     }
     if (!session->model || !session->ctx) {
-        return env->NewStringUTF("ERROR: model or context is null");
+        return env->NewStringUTF("ERR|NULL_CTX|model or context is null");
+    }
+
+    // C2-2.8: RAII guard — sets running=true now, running=false on scope exit.
+    // nativeUnload spin-waits on running==false before freeing ctx/model.
+    InferenceGuard guard(session);
+
+    // Re-check poisoned after setting running — handles race where unload set
+    // poisoned between our first check and InferenceGuard construction.
+    if (session->poisoned.load(std::memory_order_acquire)) {
+        return env->NewStringUTF("ERR|POISONED|session unloaded during inference setup");
     }
 
     // Reset cancel flag at inference start
@@ -306,7 +350,7 @@ Java_com_cybersentinel_app_domain_llm_LlamaCppRuntime_nativeRunInference(
 
     const char* promptCStr = env->GetStringUTFChars(jPrompt, nullptr);
     if (!promptCStr) {
-        return env->NewStringUTF("ERROR: null prompt");
+        return env->NewStringUTF("ERR|NULL_PROMPT|null prompt");
     }
     std::string prompt(promptCStr);
     env->ReleaseStringUTFChars(jPrompt, promptCStr);
@@ -326,14 +370,14 @@ Java_com_cybersentinel_app_domain_llm_LlamaCppRuntime_nativeRunInference(
 
     if (n_tokens < 0) {
         LOGE("nativeRunInference: tokenization failed (n_tokens=%d)", n_tokens);
-        return env->NewStringUTF("ERROR: tokenization failed");
+        return env->NewStringUTF("ERR|TOKENIZE|tokenization failed");
     }
     tokens.resize(n_tokens);
 
     // Check if prompt fits in context
     if (n_tokens >= session->n_ctx) {
         LOGW("nativeRunInference: prompt too long (%d tokens > n_ctx=%d)", n_tokens, session->n_ctx);
-        return env->NewStringUTF("ERROR: prompt exceeds context window");
+        return env->NewStringUTF("ERR|CTX_OVERFLOW|prompt exceeds context window");
     }
 
     // Clear KV cache for fresh inference
@@ -350,7 +394,7 @@ Java_com_cybersentinel_app_domain_llm_LlamaCppRuntime_nativeRunInference(
     if (llama_decode(session->ctx, batch) != 0) {
         llama_batch_free(batch);
         LOGE("nativeRunInference: prompt decode failed");
-        return env->NewStringUTF("ERROR: prompt decode failed");
+        return env->NewStringUTF("ERR|DECODE|prompt decode failed");
     }
     llama_batch_free(batch);
 
@@ -449,8 +493,13 @@ Java_com_cybersentinel_app_domain_llm_LlamaCppRuntime_nativeRunInference(
 }
 
 // ══════════════════════════════════════════════════════════
-//  nativeUnload — atomic cleanup via registry erase (C2-2.7)
+//  nativeUnload — atomic cleanup via registry erase (C2-2.7 + C2-2.8 running guard)
 // ══════════════════════════════════════════════════════════
+
+/** C2-2.8: Maximum time to wait for in-flight inference to finish before freeing resources */
+static constexpr int UNLOAD_WAIT_MS = 300;
+/** C2-2.8: Polling interval while waiting for inference to finish */
+static constexpr int UNLOAD_POLL_MS = 10;
 
 extern "C" JNIEXPORT void JNICALL
 Java_com_cybersentinel_app_domain_llm_LlamaCppRuntime_nativeUnload(
@@ -478,9 +527,28 @@ Java_com_cybersentinel_app_domain_llm_LlamaCppRuntime_nativeUnload(
     // Signal cancel to any in-flight inference before freeing model resources
     session->cancel_flag.store(true, std::memory_order_release);
 
-    // Free llama resources while we hold the shared_ptr.
-    // The session struct itself is freed when the last shared_ptr goes out of scope
-    // (either here if no in-flight inference, or when the in-flight inference finishes).
+    // C2-2.8: Wait for in-flight inference to finish (running == false).
+    // InferenceGuard sets running=true at start, false on scope exit.
+    // We spin-wait with a timeout. If timeout fires, we intentionally LEAK
+    // ctx/model rather than crash by freeing memory an active thread is using.
+    int waited_ms = 0;
+    while (session->running.load(std::memory_order_acquire) && waited_ms < UNLOAD_WAIT_MS) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(UNLOAD_POLL_MS));
+        waited_ms += UNLOAD_POLL_MS;
+    }
+
+    if (session->running.load(std::memory_order_acquire)) {
+        // Inference still running after timeout — DO NOT free ctx/model.
+        // Leak is strictly better than use-after-free crash.
+        // The shared_ptr still holds the LlamaSession; it will be freed when
+        // the inference thread's shared_ptr copy drops (InferenceGuard destruction).
+        LOGE("nativeUnload: inference still running after %dms wait — SKIPPING ctx/model free "
+             "(intentional leak to prevent use-after-free). handle=0x%llx",
+             UNLOAD_WAIT_MS, (unsigned long long)handle);
+        return;
+    }
+
+    // Safe to free — no thread is using ctx/model.
     if (session->ctx) {
         llama_free(session->ctx);
         session->ctx = nullptr;
