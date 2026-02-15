@@ -12,7 +12,6 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -206,11 +205,11 @@ private fun IncidentCard(
 @Composable
 fun SeverityBadge(severity: IncidentSeverity) {
     val color = when (severity) {
-        IncidentSeverity.CRITICAL -> Color(0xFFD32F2F)
-        IncidentSeverity.HIGH -> Color(0xFFF57C00)
-        IncidentSeverity.MEDIUM -> Color(0xFFFBC02D)
-        IncidentSeverity.LOW -> Color(0xFF1976D2)
-        IncidentSeverity.INFO -> Color(0xFF9E9E9E)
+        IncidentSeverity.CRITICAL -> MaterialTheme.colorScheme.error
+        IncidentSeverity.HIGH -> MaterialTheme.colorScheme.tertiary
+        IncidentSeverity.MEDIUM -> MaterialTheme.colorScheme.secondary
+        IncidentSeverity.LOW -> MaterialTheme.colorScheme.primary
+        IncidentSeverity.INFO -> MaterialTheme.colorScheme.outline
     }
     Surface(
         shape = RoundedCornerShape(6.dp),

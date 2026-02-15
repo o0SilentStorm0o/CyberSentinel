@@ -15,7 +15,6 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -87,6 +86,8 @@ fun IncidentDetailScreen(
                     DetailContent(
                         detail = ui.detail!!,
                         explanationState = ui.explanationState,
+                        canExplainWithAi = ui.canExplainWithAi,
+                        gateBlockReason = ui.gateBlockReason,
                         onExplain = { viewModel.requestExplanation() },
                         onCancelExplain = { viewModel.cancelExplanation() },
                         context = context
@@ -101,6 +102,8 @@ fun IncidentDetailScreen(
 private fun DetailContent(
     detail: IncidentDetailModel,
     explanationState: ExplanationUiState,
+    canExplainWithAi: Boolean,
+    gateBlockReason: String?,
     onExplain: () -> Unit,
     onCancelExplain: () -> Unit,
     context: Context
@@ -174,6 +177,8 @@ private fun DetailContent(
                 state = explanationState,
                 isBusyFallback = detail.isBusyFallback,
                 engineSourceLabel = detail.engineSourceLabel,
+                canExplainWithAi = canExplainWithAi,
+                gateBlockReason = gateBlockReason,
                 onExplain = onExplain,
                 onCancel = onCancelExplain
             )
@@ -265,7 +270,7 @@ private fun ReasonRow(reason: ReasonUiModel) {
                 modifier = Modifier
                     .size(16.dp)
                     .padding(end = 4.dp),
-                tint = Color(0xFFF57C00)
+                tint = MaterialTheme.colorScheme.tertiary
             )
         }
         Column(modifier = Modifier.weight(1f)) {
@@ -440,6 +445,8 @@ private fun ExplanationSection(
     state: ExplanationUiState,
     isBusyFallback: Boolean,
     engineSourceLabel: String?,
+    canExplainWithAi: Boolean,
+    gateBlockReason: String?,
     onExplain: () -> Unit,
     onCancel: () -> Unit
 ) {
@@ -456,8 +463,20 @@ private fun ExplanationSection(
                         text = "Chcete podrobnější vysvětlení od AI?",
                         style = MaterialTheme.typography.bodyMedium
                     )
+                    // Show gate block reason when AI is not available
+                    if (!canExplainWithAi && gateBlockReason != null) {
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "⚠️ $gateBlockReason",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.outline
+                        )
+                    }
                     Spacer(modifier = Modifier.height(8.dp))
-                    Button(onClick = onExplain) {
+                    Button(
+                        onClick = onExplain,
+                        enabled = canExplainWithAi
+                    ) {
                         Text("Vysvětlit")
                     }
                 }

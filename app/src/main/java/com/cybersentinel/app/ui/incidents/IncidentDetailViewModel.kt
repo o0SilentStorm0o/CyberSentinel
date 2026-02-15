@@ -4,6 +4,8 @@ import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.cybersentinel.app.data.local.SecurityEventDao
+import com.cybersentinel.app.domain.capability.FeatureGatekeeper
+import com.cybersentinel.app.domain.capability.GateRule
 import com.cybersentinel.app.domain.explainability.ExplanationOrchestrator
 import com.cybersentinel.app.domain.explainability.ExplanationRequest
 import com.cybersentinel.app.domain.security.RootCauseResolver
@@ -32,14 +34,15 @@ import javax.inject.Inject
  *  5. ExplanationOrchestrator.explain() → ExplanationAnswer (may use LLM if available)
  *  6. IncidentMapper.toDetailModel() → IncidentDetailModel (replaces template version)
  *
- * Sprint UI-1: Incident detail MVP.
+ * Sprint UI-2: 6/10 — gate enforcement (disable Explain when gate=NO).
  */
 @HiltViewModel
 class IncidentDetailViewModel @Inject constructor(
     savedStateHandle: SavedStateHandle,
     private val securityEventDao: SecurityEventDao,
     private val rootCauseResolver: RootCauseResolver,
-    private val orchestrator: ExplanationOrchestrator
+    private val orchestrator: ExplanationOrchestrator,
+    private val featureGatekeeper: FeatureGatekeeper
 ) : ViewModel() {
 
     /** Event ID from navigation argument */
@@ -49,7 +52,11 @@ class IncidentDetailViewModel @Inject constructor(
         val isLoading: Boolean = true,
         val detail: IncidentDetailModel? = null,
         val explanationState: ExplanationUiState = ExplanationUiState.Idle,
-        val error: String? = null
+        val error: String? = null,
+        /** True if the "Explain" button should be enabled (gate is open) */
+        val canExplainWithAi: Boolean = false,
+        /** Reason why AI is not available (shown to user when gate=NO) */
+        val gateBlockReason: String? = null
     )
 
     private val _ui = MutableStateFlow(UiState())
@@ -89,7 +96,20 @@ class IncidentDetailViewModel @Inject constructor(
                 val answer = orchestrator.explainWithTemplate(request)
                 val detail = IncidentMapper.toDetailModel(incident, answer)
 
-                _ui.update { it.copy(isLoading = false, detail = detail) }
+                // Check gate status
+                val gateDecision = featureGatekeeper.checkGate()
+                val gateBlockReason = if (!gateDecision.allowed) {
+                    gateReasonLabel(gateDecision.rule)
+                } else null
+
+                _ui.update {
+                    it.copy(
+                        isLoading = false,
+                        detail = detail,
+                        canExplainWithAi = gateDecision.allowed,
+                        gateBlockReason = gateBlockReason
+                    )
+                }
             } catch (e: Exception) {
                 _ui.update {
                     it.copy(isLoading = false, error = "Chyba: ${e.message}")
@@ -104,6 +124,18 @@ class IncidentDetailViewModel @Inject constructor(
      */
     fun requestExplanation() {
         val incident = cachedIncident ?: return
+
+        // Re-check gate before launching LLM
+        val gateDecision = featureGatekeeper.checkGate()
+        if (!gateDecision.allowed) {
+            _ui.update {
+                it.copy(
+                    canExplainWithAi = false,
+                    gateBlockReason = gateReasonLabel(gateDecision.rule)
+                )
+            }
+            return
+        }
 
         explainJob?.cancel()
         explainJob = viewModelScope.launch {
@@ -120,8 +152,9 @@ class IncidentDetailViewModel @Inject constructor(
                     )
                 }
             } catch (e: Exception) {
+                val userMessage = LlmErrorMapper.toUserMessage(e.message ?: "")
                 _ui.update {
-                    it.copy(explanationState = ExplanationUiState.Error("Vysvětlení selhalo: ${e.message}"))
+                    it.copy(explanationState = ExplanationUiState.Error(userMessage))
                 }
             }
         }
@@ -133,5 +166,21 @@ class IncidentDetailViewModel @Inject constructor(
     fun cancelExplanation() {
         explainJob?.cancel()
         _ui.update { it.copy(explanationState = ExplanationUiState.Idle) }
+    }
+
+    /**
+     * Human-readable reason for gate denial (Czech).
+     */
+    private fun gateReasonLabel(rule: GateRule): String {
+        return when (rule) {
+            GateRule.TIER_BLOCKED -> "Zařízení nemá dostatečný výkon pro AI"
+            GateRule.KILL_SWITCH -> "AI model byl zakázán"
+            GateRule.USER_DISABLED -> "AI je vypnuté v nastavení"
+            GateRule.LOW_RAM -> "Nedostatek paměti RAM"
+            GateRule.POWER_SAVER -> "Režim úspory energie je aktivní"
+            GateRule.THERMAL_THROTTLE -> "Zařízení se přehřívá"
+            GateRule.BACKGROUND_RESTRICTED -> "Aplikace běží na pozadí"
+            GateRule.ALLOWED -> "Vše v pořádku"
+        }
     }
 }

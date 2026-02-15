@@ -164,5 +164,13 @@ data class AiStatusUiModel(
     /** True if kill switch is active */
     val killSwitchActive: Boolean,
     /** User LLM preference toggle state */
-    val userLlmEnabled: Boolean
+    val userLlmEnabled: Boolean,
+    /** True if download CTA should be enabled */
+    val canDownload: Boolean = false,
+    /** True if remove button should be enabled */
+    val canRemove: Boolean = false,
+    /** True if self-test is currently running */
+    val isSelfTesting: Boolean = false,
+    /** Download error message, if any */
+    val downloadError: String? = null
 )

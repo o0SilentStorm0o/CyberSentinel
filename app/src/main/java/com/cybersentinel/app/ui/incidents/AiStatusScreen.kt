@@ -10,21 +10,18 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import java.io.File
 
 /**
  * AI Status Screen — shows model state, capability tier, gate status,
  * download CTA, self-test results, kill switch, user LLM toggle.
  *
- * Feature gating:
- *  - TIER_0: AI completely hidden or disabled with explanation
- *  - Model NOT_DOWNLOADED: shows download CTA with size
- *  - Power saver / thermal: shows "Teď ne" with template fallback note
- *
- * Sprint UI-1: Model manager UI.
+ * Sprint UI-2: 5/10 — real download/remove/self-test wiring.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -34,6 +31,7 @@ fun AiStatusScreen(
     onRunSelfTest: () -> Unit = {}
 ) {
     val ui by viewModel.ui.collectAsStateWithLifecycle()
+    val context = LocalContext.current
 
     Scaffold(
         topBar = {
@@ -63,6 +61,9 @@ fun AiStatusScreen(
                 if (ui.modelSizeMb != null) {
                     StatusRow("Velikost:", "${ui.modelSizeMb} MB")
                 }
+                ui.availableStorageMb?.let { storage ->
+                    StatusRow("Volné místo:", "$storage MB")
+                }
 
                 ui.downloadProgress?.let { progress ->
                     Spacer(modifier = Modifier.height(8.dp))
@@ -77,12 +78,41 @@ fun AiStatusScreen(
                     )
                 }
 
-                // Download CTA when model is missing
-                if (ui.modelStateLabel == "Nestažen") {
+                ui.downloadError?.let { error ->
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = error,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
+
+                // Download CTA
+                if (ui.canDownload) {
                     Spacer(modifier = Modifier.height(8.dp))
                     val sizeLabel = ui.modelSizeMb?.let { " ($it MB)" } ?: ""
-                    Button(onClick = { /* TODO: wire modelManager.downloadModel() */ }) {
+                    Button(
+                        onClick = {
+                            val modelDir = File(context.filesDir, "models")
+                            modelDir.mkdirs()
+                            viewModel.onDownloadClick(modelDir)
+                        },
+                        enabled = ui.downloadProgress == null
+                    ) {
                         Text("Stáhnout AI model$sizeLabel")
+                    }
+                }
+
+                // Remove button
+                if (ui.canRemove) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedButton(
+                        onClick = { viewModel.onRemoveClick() },
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            contentColor = MaterialTheme.colorScheme.error
+                        )
+                    ) {
+                        Text("Smazat model")
                     }
                 }
             }
@@ -145,30 +175,48 @@ fun AiStatusScreen(
 
             // ── Self-test ──
             StatusCard(title = "Self-test") {
-                if (ui.selfTestCompleted) {
-                    StatusRow(
-                        "Výsledek:",
-                        if (ui.isProductionReady == true) "✅ Production ready" else "❌ Nedostatečný"
-                    )
-                    ui.selfTestSummary?.let { summary ->
-                        Spacer(modifier = Modifier.height(4.dp))
+                when {
+                    ui.isSelfTesting -> {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            CircularProgressIndicator(modifier = Modifier.size(20.dp))
+                            Text(
+                                text = "Self-test probíhá…",
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
+                    }
+                    ui.selfTestCompleted -> {
+                        StatusRow(
+                            "Výsledek:",
+                            if (ui.isProductionReady == true) "✅ Production ready" else "❌ Nedostatečný"
+                        )
+                        ui.selfTestSummary?.let { summary ->
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = summary,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                    else -> {
                         Text(
-                            text = summary,
+                            text = "Self-test ještě nebyl spuštěn.",
                             style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            color = MaterialTheme.colorScheme.outline
                         )
                     }
-                } else {
-                    Text(
-                        text = "Self-test ještě nebyl spuštěn.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.outline
-                    )
                 }
                 Spacer(modifier = Modifier.height(8.dp))
                 OutlinedButton(
-                    onClick = onRunSelfTest,
-                    enabled = ui.llmAvailable && !ui.killSwitchActive
+                    onClick = {
+                        viewModel.onSelfTestStarted()
+                        onRunSelfTest()
+                    },
+                    enabled = ui.llmAvailable && !ui.killSwitchActive && !ui.isSelfTesting
                 ) {
                     Text("Spustit self-test")
                 }

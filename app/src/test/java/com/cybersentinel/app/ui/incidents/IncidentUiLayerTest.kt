@@ -231,11 +231,20 @@ class IncidentUiLayerTest {
     }
 
     @Test
-    fun `toCardModel detects stalkerware threat`() {
+    fun `toCardModel detects stalkerware threat via EventType`() {
         val incident = makeIncident(
             hypotheses = listOf(
                 Hypothesis("Stalkerware detected", "desc", 0.9, listOf("e1"))
             )
+        ).copy(
+            events = listOf(
+                SecurityEvent(
+                    source = SignalSource.APP_SCANNER,
+                    type = EventType.STALKERWARE_PATTERN,
+                    severity = SignalSeverity.HIGH,
+                    summary = "Stalkerware"
+                )
+            )
         )
         val card = IncidentMapper.toCardModel(incident)
 
@@ -243,10 +252,19 @@ class IncidentUiLayerTest {
     }
 
     @Test
-    fun `toCardModel detects dropper threat`() {
+    fun `toCardModel detects dropper threat via EventType`() {
         val incident = makeIncident(
             hypotheses = listOf(
                 Hypothesis("Dropper pattern", "desc", 0.8, listOf("e1"))
+            )
+        ).copy(
+            events = listOf(
+                SecurityEvent(
+                    source = SignalSource.APP_SCANNER,
+                    type = EventType.DROPPER_PATTERN,
+                    severity = SignalSeverity.HIGH,
+                    summary = "Dropper"
+                )
             )
         )
         val card = IncidentMapper.toCardModel(incident)
@@ -254,10 +272,19 @@ class IncidentUiLayerTest {
     }
 
     @Test
-    fun `toCardModel non-threat for generic hypothesis`() {
+    fun `toCardModel non-threat for generic event type`() {
         val incident = makeIncident(
             hypotheses = listOf(
                 Hypothesis("Config change", "desc", 0.5, listOf("e1"))
+            )
+        ).copy(
+            events = listOf(
+                SecurityEvent(
+                    source = SignalSource.CONFIG_BASELINE,
+                    type = EventType.CONFIG_TAMPER,
+                    severity = SignalSeverity.MEDIUM,
+                    summary = "Config changed"
+                )
             )
         )
         val card = IncidentMapper.toCardModel(incident)
@@ -265,7 +292,7 @@ class IncidentUiLayerTest {
     }
 
     @Test
-    fun `toCardModel empty hypotheses is not threat`() {
+    fun `toCardModel empty events is not threat`() {
         val incident = makeIncident(hypotheses = emptyList())
         val card = IncidentMapper.toCardModel(incident)
         assertFalse(card.isThreat)

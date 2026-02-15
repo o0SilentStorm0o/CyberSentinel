@@ -49,6 +49,22 @@ interface SecurityEventDao {
     @Query("SELECT * FROM security_events WHERE severity IN ('CRITICAL', 'HIGH') AND isPromoted = 0 ORDER BY startTime DESC")
     suspend fun getUnpromotedHighSeverity(): List<SecurityEventEntity>
 
+    @Query("""
+        SELECT * FROM security_events 
+        WHERE severity IN ('CRITICAL', 'HIGH', 'MEDIUM') 
+           OR startTime >= :recentCutoff
+        ORDER BY 
+            CASE severity 
+                WHEN 'CRITICAL' THEN 5 
+                WHEN 'HIGH' THEN 4 
+                WHEN 'MEDIUM' THEN 3 
+                WHEN 'LOW' THEN 2 
+                ELSE 1 
+            END DESC, 
+            startTime DESC
+    """)
+    suspend fun getActiveEvents(recentCutoff: Long): List<SecurityEventEntity>
+
     @Query("SELECT * FROM security_events WHERE startTime >= :since ORDER BY startTime DESC")
     suspend fun getSince(since: Long): List<SecurityEventEntity>
 

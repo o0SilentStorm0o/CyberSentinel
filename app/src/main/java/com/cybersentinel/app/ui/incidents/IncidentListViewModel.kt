@@ -3,34 +3,33 @@ package com.cybersentinel.app.ui.incidents
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.cybersentinel.app.data.local.SecurityEventDao
-import com.cybersentinel.app.domain.security.DefaultRootCauseResolver
 import com.cybersentinel.app.domain.security.IncidentSeverity
 import com.cybersentinel.app.domain.security.IncidentStatus
-import com.cybersentinel.app.domain.security.RootCauseResolver
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import javax.inject.Inject
 
 /**
  * IncidentListViewModel — drives the incident list screen.
  *
- * Data flow:
- *  1. SecurityEventDao.getAll() → List<SecurityEventEntity>
- *  2. IncidentMapper.toDomain() → List<SecurityEvent>
- *  3. RootCauseResolver.resolve() → List<SecurityIncident>
- *  4. IncidentMapper.toCardModel() → List<IncidentCardModel>
- *  5. Sort: severity desc, then createdAt desc
+ * Data flow (UI-2 optimized — no resolve() in list):
+ *  1. SecurityEventDao.getActiveEvents() → List<SecurityEventEntity>
+ *  2. IncidentMapper.toCardFromEntity() → List<IncidentCardModel>
+ *  3. Already sorted by DAO (severity desc, then time desc)
  *
- * Sprint UI-1: Incident list MVP.
+ * RootCauseResolver.resolve() is ONLY used in IncidentDetailViewModel.
+ *
+ * Sprint UI-2: 4/10 — list performance, no resolve in list.
  */
 @HiltViewModel
 class IncidentListViewModel @Inject constructor(
-    private val securityEventDao: SecurityEventDao,
-    private val rootCauseResolver: RootCauseResolver
+    private val securityEventDao: SecurityEventDao
 ) : ViewModel() {
 
     data class UiState(
@@ -51,19 +50,14 @@ class IncidentListViewModel @Inject constructor(
         viewModelScope.launch {
             _ui.update { it.copy(isLoading = true, error = null) }
             try {
-                val entities = securityEventDao.getAll()
-                val events = entities.map { IncidentMapper.toDomain(it) }
-
-                val incidents = events.map { event ->
-                    rootCauseResolver.resolve(event)
+                // Active events: CRITICAL/HIGH/MEDIUM + anything from last 7 days
+                val recentCutoff = System.currentTimeMillis() - RECENT_WINDOW_MS
+                val entities = withContext(Dispatchers.IO) {
+                    securityEventDao.getActiveEvents(recentCutoff)
                 }
 
-                val cards = incidents
-                    .map { IncidentMapper.toCardModel(it) }
-                    .sortedWith(
-                        compareByDescending<IncidentCardModel> { severityOrder(it.severity) }
-                            .thenByDescending { it.createdAt }
-                    )
+                // Entity → card directly, no resolve()
+                val cards = entities.map { IncidentMapper.toCardFromEntity(it) }
 
                 val activeCount = cards.count {
                     it.status == IncidentStatus.OPEN || it.status == IncidentStatus.INVESTIGATING
@@ -84,16 +78,8 @@ class IncidentListViewModel @Inject constructor(
         }
     }
 
-    /**
-     * Numeric order for severity sorting (higher = more severe).
-     */
-    private fun severityOrder(severity: IncidentSeverity): Int {
-        return when (severity) {
-            IncidentSeverity.CRITICAL -> 5
-            IncidentSeverity.HIGH -> 4
-            IncidentSeverity.MEDIUM -> 3
-            IncidentSeverity.LOW -> 2
-            IncidentSeverity.INFO -> 1
-        }
+    companion object {
+        /** Include LOW/INFO events from the last 7 days. */
+        const val RECENT_WINDOW_MS = 7L * 24 * 60 * 60 * 1000
     }
 }

@@ -23,7 +23,8 @@ class DashboardViewModel @Inject constructor(
     private val scoreEngine: SecurityScoreEngine,
     private val deviceAnalyzer: DeviceSecurityAnalyzer,
     private val appsScanner: InstalledAppsScanner,
-    private val preferences: AppPreferences
+    private val preferences: AppPreferences,
+    private val eventRecorder: EventRecorder
 ) : ViewModel() {
     
     private val _ui = MutableStateFlow(DashboardUiState())
@@ -89,6 +90,10 @@ class DashboardViewModel @Inject constructor(
                     networkIssues = networkIssues,
                     accountIssues = accountIssues
                 )
+
+                // Persist events so the incident list is populated
+                eventRecorder.recordScanResults(deviceIssues, appIssues)
+                eventRecorder.cleanupExpired()
                 
                 _ui.update { 
                     it.copy(

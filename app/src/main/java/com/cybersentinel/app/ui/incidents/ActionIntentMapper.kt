@@ -3,6 +3,7 @@ package com.cybersentinel.app.ui.incidents
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
 import android.provider.Settings
 import com.cybersentinel.app.domain.security.ActionCategory
 
@@ -15,7 +16,7 @@ import com.cybersentinel.app.domain.security.ActionCategory
  * Fallback: If a specific deep-link doesn't exist on the device, falls back
  * to the most relevant Settings screen.
  *
- * Sprint UI-1: CTA mapping for action steps.
+ * Sprint UI-2: 7/10 — refined special access intents with metadata routing.
  */
 object ActionIntentMapper {
 
@@ -24,9 +25,14 @@ object ActionIntentMapper {
      *
      * @param category The action type from the incident's recommended actions
      * @param targetPackage The package to act on (null for device-level actions)
+     * @param metadata Optional metadata for context-sensitive routing
      * @return Intent ready to launch, or null if action is internal-only
      */
-    fun createIntent(category: ActionCategory, targetPackage: String?): Intent? {
+    fun createIntent(
+        category: ActionCategory,
+        targetPackage: String?,
+        metadata: Map<String, String> = emptyMap()
+    ): Intent? {
         return when (category) {
             ActionCategory.UNINSTALL -> {
                 if (targetPackage == null) return null
@@ -34,26 +40,19 @@ object ActionIntentMapper {
             }
 
             ActionCategory.DISABLE -> {
-                // Open app details where user can "Force Stop" / "Disable"
                 createAppDetailsIntent(targetPackage) ?: openAppSettingsIntent()
             }
 
             ActionCategory.REVOKE_PERMISSION -> {
-                // Android doesn't allow revoking permissions programmatically from another app.
-                // Best we can do: open the app's details / permission screen.
                 createAppDetailsIntent(targetPackage) ?: openAppSettingsIntent()
             }
 
             ActionCategory.REVOKE_SPECIAL_ACCESS -> {
-                // Open the specific special access settings screen.
-                // The user must navigate to the specific toggle.
-                Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).apply {
-                    flags = Intent.FLAG_ACTIVITY_NEW_TASK
-                }
+                // Route to the specific special access settings based on metadata
+                createSpecialAccessIntent(targetPackage, metadata)
             }
 
             ActionCategory.CHECK_SETTINGS -> {
-                // Open security & privacy settings
                 Intent(Settings.ACTION_SECURITY_SETTINGS).apply {
                     flags = Intent.FLAG_ACTIVITY_NEW_TASK
                 }
@@ -67,21 +66,71 @@ object ActionIntentMapper {
             }
 
             ActionCategory.FACTORY_RESET -> {
-                // NEVER do factory reset directly. Open the reset settings for user to decide.
                 @Suppress("DEPRECATION")
                 Intent(Settings.ACTION_PRIVACY_SETTINGS).apply {
                     flags = Intent.FLAG_ACTIVITY_NEW_TASK
                 }
             }
 
-            ActionCategory.MONITOR -> {
-                // Internal action — UI handles this (e.g., pin package for monitoring)
-                null
+            ActionCategory.MONITOR -> null
+            ActionCategory.INFORM -> null
+        }
+    }
+
+    /**
+     * Route REVOKE_SPECIAL_ACCESS to the most specific Settings screen
+     * based on which special access flags are active in metadata.
+     *
+     * Metadata keys (from EventRecorder → SpecialAccessSnapshot):
+     *  - "accessibility" → ACTION_ACCESSIBILITY_SETTINGS
+     *  - "notificationListener" → ACTION_NOTIFICATION_LISTENER_SETTINGS
+     *  - "deviceAdmin" → ACTION_SECURITY_SETTINGS (device admin list)
+     *  - "overlay" → ACTION_MANAGE_OVERLAY_PERMISSION (per-app on API 23+)
+     *
+     * If multiple are true, picks the most dangerous one first.
+     */
+    internal fun createSpecialAccessIntent(
+        targetPackage: String?,
+        metadata: Map<String, String>
+    ): Intent {
+        // Priority: overlay → accessibility → notification listener → device admin → generic
+        return when {
+            metadata["overlay"] == "true" && targetPackage != null -> {
+                // Per-app overlay permission (API 23+)
+                Intent(
+                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                    Uri.parse("package:$targetPackage")
+                ).apply {
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                }
             }
 
-            ActionCategory.INFORM -> {
-                // Internal action — UI shows info dialog, no system navigation
-                null
+            metadata["accessibility"] == "true" -> {
+                Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).apply {
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                }
+            }
+
+            metadata["notificationListener"] == "true" -> {
+                Intent(NOTIFICATION_LISTENER_SETTINGS).apply {
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                }
+            }
+
+            metadata["deviceAdmin"] == "true" -> {
+                // No per-app deep link for device admin; open security settings
+                @Suppress("DEPRECATION")
+                Intent(Settings.ACTION_SECURITY_SETTINGS).apply {
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                }
+            }
+
+            else -> {
+                // Fallback: app details for the target package, or generic accessibility
+                createAppDetailsIntent(targetPackage)
+                    ?: Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).apply {
+                        flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                    }
             }
         }
     }
@@ -129,4 +178,8 @@ object ActionIntentMapper {
             ActionCategory.INFORM -> "Informace"
         }
     }
+
+    /** Settings constant for notification listener settings. */
+    private const val NOTIFICATION_LISTENER_SETTINGS =
+        "android.settings.ACTION_NOTIFICATION_LISTENER_SETTINGS"
 }

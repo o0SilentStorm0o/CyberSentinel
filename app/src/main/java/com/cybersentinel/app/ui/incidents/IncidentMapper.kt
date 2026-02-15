@@ -37,7 +37,66 @@ object IncidentMapper {
     }
 
     // ══════════════════════════════════════════════════════════
-    //  Incident → Card Model
+    //  Entity → Card Model (no resolve, list-optimized)
+    // ══════════════════════════════════════════════════════════
+
+    /**
+     * Map a SecurityEventEntity directly to a list card model,
+     * WITHOUT running RootCauseResolver. This is the fast path for the list.
+     *
+     * Threat detection uses EventType + severity instead of hypothesis name matching.
+     */
+    fun toCardFromEntity(entity: SecurityEventEntity): IncidentCardModel {
+        val severity = try { IncidentSeverity.valueOf(entity.severity) }
+                       catch (_: Exception) { IncidentSeverity.INFO }
+        val eventType = try { EventType.valueOf(entity.eventType) }
+                        catch (_: Exception) { EventType.OTHER }
+        val packages = if (entity.packageName != null) listOf(entity.packageName) else emptyList()
+
+        val isThreat = isThreatEvent(eventType, severity)
+
+        return IncidentCardModel(
+            incidentId = entity.id,
+            title = entity.summary,
+            shortSummary = buildShortSummary(entity),
+            severity = severity,
+            status = if (entity.isPromoted) IncidentStatus.RESOLVED else IncidentStatus.OPEN,
+            displayPackages = packages.take(MAX_DISPLAY_PACKAGES),
+            totalAffectedPackages = packages.size,
+            createdAt = entity.startTime,
+            isThreat = isThreat
+        )
+    }
+
+    /**
+     * Threat detection based on EventType + severity.
+     * Replaces hypothesis name matching (review fix).
+     */
+    internal fun isThreatEvent(eventType: EventType, severity: IncidentSeverity): Boolean {
+        val threatTypes = setOf(
+            EventType.STALKERWARE_PATTERN,
+            EventType.DROPPER_PATTERN,
+            EventType.OVERLAY_ATTACK_PATTERN,
+            EventType.DEVICE_COMPROMISE
+        )
+        return eventType in threatTypes ||
+               (eventType == EventType.CAPABILITY_ESCALATION && severity <= IncidentSeverity.HIGH)
+    }
+
+    /**
+     * Build a short summary from entity metadata or summary field.
+     */
+    private fun buildShortSummary(entity: SecurityEventEntity): String {
+        val meta = parseMetadata(entity.metadata)
+        val desc = meta["description"] ?: meta["details"] ?: ""
+        val text = desc.ifBlank { entity.summary }
+        return text.take(MAX_SUMMARY_LENGTH).let {
+            if (text.length > MAX_SUMMARY_LENGTH) "$it…" else it
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════
+    //  Incident → Card Model (full resolve path, used by detail)
     // ══════════════════════════════════════════════════════════
 
     /**
@@ -46,9 +105,11 @@ object IncidentMapper {
      */
     fun toCardModel(incident: SecurityIncident): IncidentCardModel {
         val displayPkgs = incident.affectedPackages.take(MAX_DISPLAY_PACKAGES)
-        val threatPatterns = setOf("stalkerware", "dropper", "malware", "overlay", "spyware")
-        val isThreat = incident.hypotheses.any { h ->
-            threatPatterns.any { h.name.lowercase().contains(it) }
+
+        // Threat detection via EventType + severity (not hypothesis name matching)
+        val eventTypes = incident.events.map { it.type }.toSet()
+        val isThreat = eventTypes.any { type ->
+            isThreatEvent(type, incident.severity)
         }
 
         return IncidentCardModel(
