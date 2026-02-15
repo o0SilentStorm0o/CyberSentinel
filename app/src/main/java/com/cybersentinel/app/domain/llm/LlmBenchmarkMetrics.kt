@@ -54,7 +54,18 @@ data class LlmBenchmarkResult(
      * if native heap is near the limit. Track this to detect fragmentation/GC pressure
      * before it becomes a production OOM.
      */
-    val peakNativeHeapBytes: Long = 0
+    val peakNativeHeapBytes: Long = 0,
+    /**
+     * C2-2.6: Average number of tokens generated per successful inference run.
+     * Helps detect over-generation when stop condition misses.
+     */
+    val avgGeneratedTokens: Float = 0f,
+    /**
+     * C2-2.6: Maximum number of tokens generated in any single run.
+     * If this equals maxNewTokens, the stop condition likely failed for at least one run —
+     * the model hit the token limit instead of producing a closed JSON object.
+     */
+    val maxGeneratedTokens: Int = 0
 ) {
     /** Total benchmark duration in milliseconds */
     val durationMs: Long get() = completedAt - startedAt
@@ -81,6 +92,9 @@ data class LlmBenchmarkResult(
             appendLine("Latency: avg ${latency.avgMs}ms, p95 ${latency.p95Ms}ms, p99 ${latency.p99Ms}ms")
             appendLine("Compliance: ${"%.1f".format(quality.schemaComplianceRate * 100)}%")
             appendLine("Fallback: ${"%.1f".format(pipeline.templateFallbackRate * 100)}%")
+            if (avgGeneratedTokens > 0f) {
+                appendLine("Tokens: avg ${"%.1f".format(avgGeneratedTokens)}, max $maxGeneratedTokens")
+            }
             if (peakNativeHeapBytes > 0) {
                 appendLine("Peak native heap: ${peakNativeHeapBytes / (1024 * 1024)}MB")
             }

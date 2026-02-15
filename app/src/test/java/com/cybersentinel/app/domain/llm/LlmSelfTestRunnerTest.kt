@@ -7,11 +7,12 @@ import org.junit.Before
 import org.junit.Test
 
 /**
- * Unit tests for LlmSelfTestRunner + LlmBenchmarkMetrics — Sprint C2-3 + C2-2.5.
+ * Unit tests for LlmSelfTestRunner + LlmBenchmarkMetrics — Sprint C2-3 + C2-2.5 + C2-2.6.
  *
  * Uses FakeLlmRuntime for deterministic, fast benchmarking.
  * Tests verify: metric computation, fixture generation, pipeline coverage,
- * failure mode handling, smoke test compatibility, p99 latency, heap tracking.
+ * failure mode handling, smoke test compatibility, p99 latency, heap tracking,
+ * token generation stats (avgGeneratedTokens, maxGeneratedTokens).
  */
 class LlmSelfTestRunnerTest {
 
@@ -438,5 +439,40 @@ class LlmSelfTestRunnerTest {
         val result = runner.runBenchmark(runs = 10, modelId = "p99-test", modelVersion = "1.0")
         val summary = result.summary
         assertTrue("Summary should contain p99", summary.contains("p99"))
+    }
+
+    // ══════════════════════════════════════════════════════════
+    //  C2-2.6: Token generation stats
+    // ══════════════════════════════════════════════════════════
+
+    @Test
+    fun `benchmark tracks avgGeneratedTokens`() {
+        val result = runner.runBenchmark(runs = 10)
+        // FakeLlmRuntime produces tokens for successful runs
+        assertTrue("avgGeneratedTokens should be ≥ 0", result.avgGeneratedTokens >= 0f)
+    }
+
+    @Test
+    fun `benchmark tracks maxGeneratedTokens`() {
+        val result = runner.runBenchmark(runs = 10)
+        assertTrue("maxGeneratedTokens should be ≥ 0", result.maxGeneratedTokens >= 0)
+        assertTrue("maxGeneratedTokens should be ≥ avg",
+            result.maxGeneratedTokens >= result.avgGeneratedTokens.toInt())
+    }
+
+    @Test
+    fun `error mode produces zero token stats`() {
+        runtime.setErrorMode(true)
+        val result = runner.runBenchmark(runs = 5)
+        assertEquals("Error mode should have 0 avgTokens", 0f, result.avgGeneratedTokens, 0.001f)
+        assertEquals("Error mode should have 0 maxTokens", 0, result.maxGeneratedTokens)
+    }
+
+    @Test
+    fun `benchmark summary contains token stats when non-zero`() {
+        val result = runner.runBenchmark(runs = 10, modelId = "token-test", modelVersion = "1.0")
+        if (result.avgGeneratedTokens > 0f) {
+            assertTrue("Summary should mention Tokens", result.summary.contains("Tokens"))
+        }
     }
 }

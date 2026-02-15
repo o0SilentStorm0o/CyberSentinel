@@ -8,20 +8,22 @@
  *   3. nativeUnload          — free model + context
  *   4. nativeCancelInference — cooperative cancel via atomic flag
  *
- * Design decisions (C2-2.5 hardening):
+ * Design decisions (C2-2.5 + C2-2.6 hardening):
  *   - Static link ggml + llama.cpp (no separate .so for ggml)
  *   - CPU-only inference (no Vulkan/NNAPI in C2-2; future C2-4)
  *   - Hard n_ctx ceiling (2048 default — slots-only prompts are short)
  *   - DETERMINISTIC sampling: temperature=0, greedy top-1 (no randomness)
  *   - Cooperative cancel flag: checked every token in decode loop
  *   - JSON stop sequence: stops on closed JSON object (balanced braces)
+ *     with stateful escape handling for \\\" sequences (C2-2.6)
  *   - Hard timeout via elapsed-time check each token
- *   - No streaming — returns "token_count|output_text" on completion
+ *   - No streaming — returns "token_count|ttft_ms|output_text" on completion
+ *   - Poisoned handle guard: after unload, all JNI calls return error (C2-2.6)
  *   - Single model context per handle (no batched inference)
- *   - LlamaSession struct owns model+context+cancel atomically
+ *   - LlamaSession struct owns model+context+cancel+poisoned atomically
  *
- * Return format: "TOKEN_COUNT|generated_text"
- *   Kotlin side splits on first '|' to get exact token count.
+ * Return format: "TOKEN_COUNT|TTFT_MS|generated_text"
+ *   Kotlin side splits on first two '|' to get exact token count and TTFT.
  *
  * Build: Via CMakeLists.txt → libllama_jni.so (arm64-v8a only)
  *
@@ -53,6 +55,9 @@
 /**
  * Single-owner session struct. The jlong handle IS a pointer to this struct.
  * Ensures model and context are freed together, and cancel flag is per-session.
+ *
+ * After nativeUnload, model+ctx are set to nullptr ("poisoned") before delete.
+ * All JNI entry points must null-check model+ctx to handle stale handles safely.
  */
 struct LlamaSession {
     llama_model*       model       = nullptr;
@@ -60,6 +65,7 @@ struct LlamaSession {
     int                n_ctx       = 2048;
     int                n_threads   = 4;
     std::atomic<bool>  cancel_flag{false};  // cooperative cancel — checked every token
+    std::atomic<bool>  poisoned{false};     // set after unload — prevents reuse
 };
 
 // ══════════════════════════════════════════════════════════
@@ -140,11 +146,41 @@ Java_com_cybersentinel_app_domain_llm_LlamaCppRuntime_nativeLoadModel(
 /**
  * Helper: check if generated JSON object is closed (balanced braces).
  * Returns true when we've seen at least one '{' and brace depth returns to 0.
+ *
+ * C2-2.6 hardening:
+ *  - Stateful escape handling: counts consecutive backslashes to correctly handle
+ *    sequences like \\\" (escaped backslash + unescaped quote) vs \" (escaped quote).
+ *  - Ignores all characters before the first '{' (handles whitespace/preamble).
+ *  - Tracks in_string state to avoid counting braces inside string literals.
  */
 static bool is_json_object_closed(const std::string& text) {
     int depth = 0;
     bool seen_open = false;
+    bool in_string = false;
+    int consecutive_backslashes = 0;
+
     for (char c : text) {
+        if (!seen_open && c != '{') {
+            // Skip any preamble before first '{'
+            continue;
+        }
+
+        if (c == '\\') {
+            consecutive_backslashes++;
+            continue;
+        }
+
+        // A quote is escaped only if preceded by an ODD number of backslashes
+        bool char_is_escaped = (consecutive_backslashes % 2) == 1;
+        consecutive_backslashes = 0;
+
+        if (c == '"' && !char_is_escaped) {
+            in_string = !in_string;
+            continue;
+        }
+
+        if (in_string) continue;
+
         if (c == '{') { depth++; seen_open = true; }
         else if (c == '}') { depth--; }
         if (seen_open && depth == 0) return true;
@@ -168,6 +204,11 @@ Java_com_cybersentinel_app_domain_llm_LlamaCppRuntime_nativeRunInference(
     }
 
     auto* session = reinterpret_cast<LlamaSession*>(handle);
+
+    // C2-2.6: poisoned handle guard — prevents use-after-free race
+    if (session->poisoned.load(std::memory_order_acquire)) {
+        return env->NewStringUTF("ERROR: session has been unloaded (poisoned handle)");
+    }
     if (!session->model || !session->ctx) {
         return env->NewStringUTF("ERROR: model or context is null");
     }
@@ -229,6 +270,7 @@ Java_com_cybersentinel_app_domain_llm_LlamaCppRuntime_nativeRunInference(
     // temperature=0 → always pick highest-logit token (argmax / greedy)
     // No top-p, no sampling from distribution → maximal schema compliance
     auto start_time = std::chrono::steady_clock::now();
+    long long ttft_ms = 0;  // C2-2.6: time to first token (ms)
     std::string output;
     output.reserve(maxTokens * 8);
 
@@ -279,6 +321,13 @@ Java_com_cybersentinel_app_domain_llm_LlamaCppRuntime_nativeRunInference(
 
         generated_count++;
 
+        // C2-2.6: capture time-to-first-token on first generated token
+        if (generated_count == 1) {
+            auto first_token_time = std::chrono::steady_clock::now();
+            ttft_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                first_token_time - start_time).count();
+        }
+
         // ── JSON stop sequence: if output contains a closed JSON object, stop ──
         // This prevents generating garbage after the valid JSON payload.
         if (is_json_object_closed(output)) {
@@ -299,11 +348,15 @@ Java_com_cybersentinel_app_domain_llm_LlamaCppRuntime_nativeRunInference(
         llama_batch_free(single);
     }
 
-    LOGI("nativeRunInference: generated %d tokens, %zu chars", generated_count, output.size());
+    LOGI("nativeRunInference: generated %d tokens, %zu chars, ttft=%lld ms",
+         generated_count, output.size(), ttft_ms);
 
-    // Return format: "TOKEN_COUNT|output_text"
-    // Kotlin splits on first '|' to extract exact generated token count.
-    std::string result = std::to_string(generated_count) + "|" + output;
+    // Return format: "TOKEN_COUNT|TTFT_MS|output_text"
+    // C2-2.6: extended from "TOKEN_COUNT|text" to include real TTFT measurement.
+    // Kotlin splits on first two '|' to extract token count and TTFT.
+    std::string result = std::to_string(generated_count) + "|"
+                       + std::to_string(ttft_ms) + "|"
+                       + output;
     return env->NewStringUTF(result.c_str());
 }
 
@@ -320,6 +373,10 @@ Java_com_cybersentinel_app_domain_llm_LlamaCppRuntime_nativeUnload(
     if (handle == 0) return;
 
     auto* session = reinterpret_cast<LlamaSession*>(handle);
+
+    // C2-2.6: mark poisoned FIRST — prevents any concurrent JNI call from using this session
+    session->poisoned.store(true, std::memory_order_release);
+
     LOGI("nativeUnload: freeing session=%p", session);
 
     // Signal cancel to any in-flight inference before freeing
@@ -327,11 +384,11 @@ Java_com_cybersentinel_app_domain_llm_LlamaCppRuntime_nativeUnload(
 
     if (session->ctx) {
         llama_free(session->ctx);
-        session->ctx = nullptr;
+        session->ctx = nullptr;  // C2-2.6: null-ify before delete for stale-handle safety
     }
     if (session->model) {
         llama_free_model(session->model);
-        session->model = nullptr;
+        session->model = nullptr;  // C2-2.6: null-ify before delete
     }
 
     delete session;
@@ -354,6 +411,8 @@ Java_com_cybersentinel_app_domain_llm_LlamaCppRuntime_nativeCancelInference(
 ) {
     if (handle == 0) return;
     auto* session = reinterpret_cast<LlamaSession*>(handle);
+    // C2-2.6: skip if already poisoned (unloaded) — prevents use-after-free
+    if (session->poisoned.load(std::memory_order_acquire)) return;
     session->cancel_flag.store(true, std::memory_order_release);
     LOGI("nativeCancelInference: cancel flag set for session=%p", session);
 }

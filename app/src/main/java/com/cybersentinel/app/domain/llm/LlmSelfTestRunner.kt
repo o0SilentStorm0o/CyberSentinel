@@ -69,6 +69,7 @@ class LlmSelfTestRunner(
         val singleResults = mutableListOf<SingleRunResult>()
         val inferenceResults = mutableListOf<InferenceResult>()
         var peakNativeHeap = 0L
+        val tokenCounts = mutableListOf<Int>()
 
         val severities = IncidentSeverity.values()
 
@@ -80,6 +81,9 @@ class LlmSelfTestRunner(
             val result = runSingle(i, severity)
             singleResults.add(result)
             inferenceResults.add(result.inferenceResult)
+
+            // C2-2.6: track token counts for avgGeneratedTokens / maxGeneratedTokens
+            result.inferenceResult.tokensGenerated?.let { tokenCounts.add(it) }
 
             val heapAfter = nativeHeapBytesProvider()
             val heapMax = maxOf(heapBefore, heapAfter)
@@ -100,7 +104,9 @@ class LlmSelfTestRunner(
             inferenceConfig = inferenceConfig,
             startedAt = startedAt,
             completedAt = completedAt,
-            peakNativeHeapBytes = peakNativeHeap
+            peakNativeHeapBytes = peakNativeHeap,
+            avgGeneratedTokens = if (tokenCounts.isNotEmpty()) tokenCounts.average().toFloat() else 0f,
+            maxGeneratedTokens = tokenCounts.maxOrNull() ?: 0
         )
     }
 

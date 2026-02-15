@@ -4,13 +4,13 @@ import org.junit.Assert.*
 import org.junit.Test
 
 /**
- * Unit tests for LlamaCppRuntime — Sprint C2-2 + C2-2.5.
+ * Unit tests for LlamaCppRuntime — Sprint C2-2 + C2-2.5 + C2-2.6.
  *
  * Note: These tests run in JVM (not on device), so:
  *  - No actual JNI calls (UnsatisfiedLinkError expected)
  *  - Build.SUPPORTED_ABIS is null/empty in JVM → isArm64Device() returns false
  *  - Tests focus on: ABI gating, unloaded state behavior, contract compliance,
- *    cancel support, timeout grace constant, deterministic config
+ *    cancel support, timeout grace, cooldown, single-flight, JNI output parsing
  *
  * On-device/instrumented tests are in LlmPipelineSmokeTest (androidTest).
  */
@@ -196,5 +196,93 @@ class LlamaCppRuntimeTest {
         runtime.shutdown()
         val result = runtime.runInference("test", InferenceConfig.SLOTS_DEFAULT)
         assertFalse(result.success)
+    }
+
+    // ══════════════════════════════════════════════════════════
+    //  C2-2.6: Single-flight, cooldown, JNI output parsing
+    // ══════════════════════════════════════════════════════════
+
+    @Test
+    fun `CANCEL_COOLDOWN_MS is positive and reasonable`() {
+        assertTrue("Cooldown should be > 0", LlamaCppRuntime.CANCEL_COOLDOWN_MS > 0)
+        assertTrue("Cooldown should be < 1000ms", LlamaCppRuntime.CANCEL_COOLDOWN_MS < 1000)
+    }
+
+    @Test
+    fun `parseJniOutput parses C2-2_6 extended format TOKENS TTFT text`() {
+        val runtime = LlamaCppRuntime.createUnloaded()
+        val parsed = runtime.parseJniOutput("42|15|{\"severity\":\"HIGH\"}")
+        assertEquals(42, parsed.tokenCount)
+        assertEquals(15L, parsed.ttftMs)
+        assertEquals("{\"severity\":\"HIGH\"}", parsed.text)
+    }
+
+    @Test
+    fun `parseJniOutput falls back to C2-2_5 format TOKENS text`() {
+        val runtime = LlamaCppRuntime.createUnloaded()
+        // Only one pipe → C2-2.5 format (no TTFT)
+        val parsed = runtime.parseJniOutput("42|{\"severity\":\"HIGH\"}")
+        assertEquals(42, parsed.tokenCount)
+        assertNull("TTFT should be null for old format", parsed.ttftMs)
+        assertEquals("{\"severity\":\"HIGH\"}", parsed.text)
+    }
+
+    @Test
+    fun `parseJniOutput rejects non-digit prefix`() {
+        val runtime = LlamaCppRuntime.createUnloaded()
+        val parsed = runtime.parseJniOutput("abc|some text")
+        // Should fallback — abc is not all digits
+        assertNull(parsed.ttftMs)
+        assertEquals("abc|some text", parsed.text)
+    }
+
+    @Test
+    fun `parseJniOutput rejects prefix longer than 6 digits`() {
+        val runtime = LlamaCppRuntime.createUnloaded()
+        // 7-digit prefix → too long
+        val parsed = runtime.parseJniOutput("1234567|text")
+        assertEquals("1234567|text", parsed.text)
+    }
+
+    @Test
+    fun `parseJniOutput handles empty output`() {
+        val runtime = LlamaCppRuntime.createUnloaded()
+        val parsed = runtime.parseJniOutput("")
+        assertEquals("", parsed.text)
+        assertNull(parsed.ttftMs)
+    }
+
+    @Test
+    fun `parseJniOutput handles output with no pipe`() {
+        val runtime = LlamaCppRuntime.createUnloaded()
+        val parsed = runtime.parseJniOutput("just some text")
+        assertEquals("just some text", parsed.text)
+        assertNull(parsed.ttftMs)
+    }
+
+    @Test
+    fun `parseJniOutput handles pipe in generated text`() {
+        val runtime = LlamaCppRuntime.createUnloaded()
+        // Text contains | but it's after the two prefixes
+        val parsed = runtime.parseJniOutput("10|5|text with | pipe in it")
+        assertEquals(10, parsed.tokenCount)
+        assertEquals(5L, parsed.ttftMs)
+        assertEquals("text with | pipe in it", parsed.text)
+    }
+
+    @Test
+    fun `parseJniOutput handles zero token count`() {
+        val runtime = LlamaCppRuntime.createUnloaded()
+        val parsed = runtime.parseJniOutput("0|0|")
+        assertEquals(0, parsed.tokenCount)
+        assertEquals(0L, parsed.ttftMs)
+        assertEquals("", parsed.text)
+    }
+
+    @Test
+    fun `unloaded runtime error mentions not available`() {
+        val runtime = LlamaCppRuntime.createUnloaded()
+        val result = runtime.runInference("test", InferenceConfig.SLOTS_DEFAULT)
+        assertTrue("Should mention 'not available'", result.error!!.contains("not available"))
     }
 }

@@ -20,13 +20,20 @@ import java.util.concurrent.locks.ReentrantLock
  *  - **Deterministic sampling**: temperature=0, greedy argmax in JNI. No top-p, no randomness.
  *    Maximizes schema compliance for slots-only JSON output.
  *  - **JSON stop sequence**: JNI stops when braces are balanced (closed JSON object).
- *  - **Token count from JNI**: native returns "TOKEN_COUNT|text", parsed here for exact metrics.
- *  - **LlamaSession struct in C++**: model + context + cancel_flag owned atomically.
+ *  - **Token count from JNI**: native returns "TOKEN_COUNT|TTFT_MS|text", parsed here.
+ *  - **LlamaSession struct in C++**: model + context + cancel_flag + poisoned owned atomically.
  *  - **n_batch tier-aware**: 128 default, configurable at create() time.
+ *
+ * C2-2.6 hardening:
+ *  - **Single-flight inference**: tryLock fails immediately → BUSY error (no queue).
+ *  - **Timeout cooldown**: 100ms wait after cancel before returning, lets native loop stop.
+ *  - **TTFT from JNI**: real time-to-first-token measured in native decode loop.
+ *  - **Strict JNI prefix guard**: token count prefix must be ≤6 digits.
+ *  - **Poisoned handle guard in C++**: after unload, all JNI calls return error.
  *
  * Contract:
  *  - ARM64-only: `isAvailable` returns false on non-arm64 devices.
- *  - Single-inference lock: only one inference at a time (ReentrantLock).
+ *  - Single-flight: only one inference at a time; concurrent calls get BUSY error.
  *  - Idempotent shutdown: safe to call multiple times.
  *  - Native handle lifecycle: `nativeHandle` is set on load, zeroed on shutdown.
  *
@@ -38,7 +45,7 @@ import java.util.concurrent.locks.ReentrantLock
  *  - Prompt + output strings cross JNI as UTF-8 byte arrays.
  *
  * Threading:
- *  - `runInference()` acquires inferenceLock → only one call at a time.
+ *  - `runInference()` acquires inferenceLock.tryLock() → single-flight.
  *  - `shutdown()` acquires inferenceLock → safe concurrent access.
  *  - Native inference runs on a dedicated single-thread executor.
  */
@@ -80,9 +87,10 @@ class LlamaCppRuntime private constructor(
             return InferenceResult.failure("Runtime not available (handle=$nativeHandle, arm64=${isArm64Device()})")
         }
 
+        // C2-2.6: single-flight — if another inference is running, return BUSY immediately
         val acquired = inferenceLock.tryLock()
         if (!acquired) {
-            return InferenceResult.failure("Inference already in progress (single-threaded lock)")
+            return InferenceResult.failure("Inference busy: another call is in progress (single-flight)")
         }
 
         val startTime = System.currentTimeMillis()
@@ -114,6 +122,9 @@ class LlamaCppRuntime private constructor(
                 // Real timeout: cancel the future AND signal native cancel flag
                 future.cancel(true)
                 nativeCancelInferenceSafe(handle)
+                // C2-2.6: cooldown — let native loop stop before returning
+                // Without this, a quick retry could hit the lock while native is still winding down
+                Thread.sleep(CANCEL_COOLDOWN_MS)
                 val elapsed = System.currentTimeMillis() - startTime
                 return InferenceResult.failure("Timeout: inference exceeded ${config.timeoutMs}ms (native cancelled)", elapsed)
             } catch (e: CancellationException) {
@@ -136,14 +147,14 @@ class LlamaCppRuntime private constructor(
                 return InferenceResult.failure(rawOutput, totalTime)
             }
 
-            // Parse "TOKEN_COUNT|output_text" format from JNI
-            val (tokenCount, outputText) = parseJniOutput(rawOutput)
+            // Parse "TOKEN_COUNT|TTFT_MS|output_text" format from JNI (C2-2.6)
+            val parsed = parseJniOutput(rawOutput)
 
             return InferenceResult.success(
-                rawOutput = outputText,
-                timeToFirstTokenMs = (totalTime * 0.3).toLong(), // estimate; native doesn't report TTFB yet
+                rawOutput = parsed.text,
+                timeToFirstTokenMs = parsed.ttftMs,
                 totalTimeMs = totalTime,
-                tokensGenerated = tokenCount
+                tokensGenerated = parsed.tokenCount
             )
         } catch (e: UnsatisfiedLinkError) {
             val elapsed = System.currentTimeMillis() - startTime
@@ -208,21 +219,51 @@ class LlamaCppRuntime private constructor(
     // ══════════════════════════════════════════════════════════
 
     /**
-     * Parse JNI return format: "TOKEN_COUNT|output_text"
-     * Falls back to length-based estimate if format doesn't match.
+     * Parsed JNI output — structured result from "TOKEN_COUNT|TTFT_MS|text".
      */
-    private fun parseJniOutput(raw: String): Pair<Int, String> {
-        val separatorIndex = raw.indexOf('|')
-        if (separatorIndex > 0) {
-            val countStr = raw.substring(0, separatorIndex)
-            val tokenCount = countStr.toIntOrNull()
-            if (tokenCount != null) {
-                val text = raw.substring(separatorIndex + 1)
-                return Pair(tokenCount, text)
+    internal data class JniParsedOutput(
+        val text: String,
+        val tokenCount: Int,
+        val ttftMs: Long?
+    )
+
+    /**
+     * Parse JNI return format: "TOKEN_COUNT|TTFT_MS|output_text" (C2-2.6 extended)
+     *
+     * Falls back to C2-2.5 format "TOKEN_COUNT|text" if only one '|' found.
+     * Falls back to length-based estimate if format doesn't match.
+     *
+     * C2-2.6 strict prefix guard: token count + ttft prefixes must be ≤6 chars
+     * and all-digits. Prevents garbage from being parsed as metrics.
+     */
+    internal fun parseJniOutput(raw: String): JniParsedOutput {
+        val firstPipe = raw.indexOf('|')
+        if (firstPipe <= 0 || firstPipe > MAX_PREFIX_LEN) {
+            return JniParsedOutput(raw, (raw.length / 4).coerceAtLeast(1), null)
+        }
+
+        val countStr = raw.substring(0, firstPipe)
+        if (!countStr.all { it.isDigit() }) {
+            return JniParsedOutput(raw, (raw.length / 4).coerceAtLeast(1), null)
+        }
+
+        val tokenCount = countStr.toIntOrNull()
+            ?: return JniParsedOutput(raw, (raw.length / 4).coerceAtLeast(1), null)
+
+        // Try C2-2.6 extended format: "TOKEN_COUNT|TTFT_MS|text"
+        val afterFirst = raw.substring(firstPipe + 1)
+        val secondPipe = afterFirst.indexOf('|')
+        if (secondPipe > 0 && secondPipe <= MAX_PREFIX_LEN) {
+            val ttftStr = afterFirst.substring(0, secondPipe)
+            if (ttftStr.all { it.isDigit() }) {
+                val ttftMs = ttftStr.toLongOrNull()
+                val text = afterFirst.substring(secondPipe + 1)
+                return JniParsedOutput(text, tokenCount, ttftMs)
             }
         }
-        // Fallback: estimate from string length
-        return Pair((raw.length / 4).coerceAtLeast(1), raw)
+
+        // Fallback to C2-2.5 format: "TOKEN_COUNT|text"
+        return JniParsedOutput(afterFirst, tokenCount, null)
     }
 
     // ══════════════════════════════════════════════════════════
@@ -247,17 +288,17 @@ class LlamaCppRuntime private constructor(
     /**
      * Run inference on a loaded model. Deterministic greedy decode.
      *
-     * Returns "TOKEN_COUNT|output_text" format for exact token count tracking.
+     * Returns "TOKEN_COUNT|TTFT_MS|output_text" format (C2-2.6 extended).
      * Checks cooperative cancel flag every token in the decode loop.
      * Stops on: EOS, maxTokens, timeout, cancel flag, or closed JSON object.
      *
      * @param handle Native session handle from nativeLoadModel
      * @param prompt Full prompt string (UTF-8)
      * @param maxTokens Maximum new tokens to generate
-     * @param temperature Ignored in C2-2.5 (always greedy), kept for API compat
-     * @param topP Ignored in C2-2.5 (always greedy), kept for API compat
+     * @param temperature Ignored in C2-2.5+ (always greedy), kept for API compat
+     * @param topP Ignored in C2-2.5+ (always greedy), kept for API compat
      * @param timeoutMs Hard timeout in milliseconds (native side, belt+suspenders)
-     * @return "TOKEN_COUNT|text", or "ERROR:..." on failure, or null on OOM
+     * @return "TOKEN_COUNT|TTFT_MS|text", or "ERROR:..." on failure, or null on OOM
      */
     private external fun nativeRunInference(
         handle: Long,
@@ -270,7 +311,8 @@ class LlamaCppRuntime private constructor(
 
     /**
      * Unload model and free all native resources (LlamaSession struct).
-     * Sets cancel flag first so any in-flight inference stops.
+     * Sets poisoned flag first (C2-2.6), then cancel flag, so any in-flight inference stops.
+     * Nullifies model+ctx before delete for stale-handle safety.
      *
      * @param handle Native session handle
      */
@@ -302,6 +344,20 @@ class LlamaCppRuntime private constructor(
          * and we call nativeCancelInference() to force-stop the decode loop.
          */
         internal const val TIMEOUT_GRACE_MS = 500L
+
+        /**
+         * C2-2.6: Cooldown after cancel — lets the native decode loop stop before
+         * we release the inference lock. Without this, a quick retry could overlap
+         * with the winding-down native thread.
+         */
+        internal const val CANCEL_COOLDOWN_MS = 100L
+
+        /**
+         * C2-2.6: Maximum length for numeric prefixes in JNI output format.
+         * Token count and TTFT must be ≤ 6 digits (up to 999999).
+         * Prevents garbage from being parsed as metrics.
+         */
+        private const val MAX_PREFIX_LEN = 6
 
         @Volatile
         private var libraryLoaded = false

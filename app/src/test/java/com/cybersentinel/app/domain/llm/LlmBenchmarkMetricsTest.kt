@@ -239,4 +239,66 @@ class LlmBenchmarkMetricsTest {
         assertTrue(run.wasFallback)
         assertFalse(run.wasLlmAssisted)
     }
+
+    // ══════════════════════════════════════════════════════════
+    //  C2-2.6: Token generation stats
+    // ══════════════════════════════════════════════════════════
+
+    @Test
+    fun `LlmBenchmarkResult default token stats are zero`() {
+        val result = LlmBenchmarkResult(
+            modelId = "test",
+            modelVersion = "1.0",
+            runtimeId = "fake",
+            totalRuns = 0,
+            latency = LatencyMetrics.EMPTY,
+            stability = StabilityMetrics.EMPTY,
+            quality = QualityMetrics.EMPTY,
+            pipeline = PipelineMetrics.EMPTY,
+            inferenceConfig = InferenceConfig.SLOTS_DEFAULT,
+            startedAt = 0,
+            completedAt = 0
+        )
+        assertEquals(0f, result.avgGeneratedTokens, 0.001f)
+        assertEquals(0, result.maxGeneratedTokens)
+    }
+
+    @Test
+    fun `LlmBenchmarkResult with token stats shows them in summary`() {
+        val result = LlmBenchmarkResult(
+            modelId = "token-test",
+            modelVersion = "1.0",
+            runtimeId = "test-runtime",
+            totalRuns = 5,
+            latency = LatencyMetrics(100, 50, 200, 100, 180, 190, 30, 10f),
+            stability = StabilityMetrics(5, 5, 0, 0, 0),
+            quality = QualityMetrics(0.8f, 0.9f, 0, 0.75, 1, 0),
+            pipeline = PipelineMetrics(1f, 1f, 0.8f, 0.1f, 0.2f),
+            inferenceConfig = InferenceConfig.SLOTS_DEFAULT,
+            startedAt = 1000,
+            completedAt = 2000,
+            avgGeneratedTokens = 35.5f,
+            maxGeneratedTokens = 50
+        )
+        assertTrue("Summary should contain 'Tokens'", result.summary.contains("Tokens"))
+        assertTrue("Summary should contain max tokens", result.summary.contains("50"))
+    }
+
+    @Test
+    fun `LlmBenchmarkResult peakNativeHeapBytes default is zero`() {
+        val result = LlmBenchmarkResult(
+            modelId = "test",
+            modelVersion = "1.0",
+            runtimeId = "fake",
+            totalRuns = 0,
+            latency = LatencyMetrics.EMPTY,
+            stability = StabilityMetrics.EMPTY,
+            quality = QualityMetrics.EMPTY,
+            pipeline = PipelineMetrics.EMPTY,
+            inferenceConfig = InferenceConfig.SLOTS_DEFAULT,
+            startedAt = 0,
+            completedAt = 0
+        )
+        assertEquals(0L, result.peakNativeHeapBytes)
+    }
 }
