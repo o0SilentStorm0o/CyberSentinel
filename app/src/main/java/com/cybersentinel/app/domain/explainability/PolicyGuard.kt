@@ -38,11 +38,14 @@ class PolicyGuard @Inject constructor() {
     private val malwareHardEvidence = setOf(
         TrustRiskModel.FindingType.DEBUG_SIGNATURE,
         TrustRiskModel.FindingType.SIGNATURE_MISMATCH,
+        TrustRiskModel.FindingType.SIGNATURE_DRIFT,
         TrustRiskModel.FindingType.BASELINE_SIGNATURE_CHANGE,
         TrustRiskModel.FindingType.INTEGRITY_FAIL_WITH_HOOKING,
         TrustRiskModel.FindingType.INSTALLER_ANOMALY,
         TrustRiskModel.FindingType.VERSION_ROLLBACK,
-        TrustRiskModel.FindingType.HIGH_RISK_PERMISSION_ADDED
+        TrustRiskModel.FindingType.HIGH_RISK_PERMISSION_ADDED,
+        TrustRiskModel.FindingType.PARTITION_ANOMALY
+        // NOTE: NOT_PLAY_SIGNED is intentionally excluded — it's SOFT/informational
     )
 
     /** SignalTypes that indicate confirmed stalkerware pattern */
@@ -222,7 +225,8 @@ class PolicyGuard @Inject constructor() {
          * direct equivalents in the trust model.
          */
         val signalTypeToFindingType: Map<SignalType, TrustRiskModel.FindingType> = mapOf(
-            SignalType.CERT_CHANGE to TrustRiskModel.FindingType.SIGNATURE_MISMATCH,
+            // CERT_CHANGE from baseline → SIGNATURE_DRIFT (real integrity change)
+            SignalType.CERT_CHANGE to TrustRiskModel.FindingType.SIGNATURE_DRIFT,
             SignalType.VERSION_ROLLBACK to TrustRiskModel.FindingType.VERSION_ROLLBACK,
             SignalType.INSTALLER_CHANGE to TrustRiskModel.FindingType.INSTALLER_ANOMALY,
             SignalType.HIGH_RISK_PERM_ADDED to TrustRiskModel.FindingType.HIGH_RISK_PERMISSION_ADDED,

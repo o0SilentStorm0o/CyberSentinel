@@ -187,7 +187,9 @@ class AppSecurityScanner @Inject constructor(
         val category: IssueCategory,
         val severity: RiskLevel,
         val action: IssueAction,
-        val technicalDetails: String? = null
+        val technicalDetails: String? = null,
+        /** If true, only show in expert/detail view, not in the main scan list */
+        val isExpertOnly: Boolean = false
     )
     
     enum class IssueCategory(val label: String) {
@@ -421,10 +423,22 @@ class AppSecurityScanner @Inject constructor(
         
         // ── 1. Collect trust evidence (multi-factor) ──
         val certFingerprint = signatureAnalysis.sha256Fingerprint
-        val trustVerification = TrustedAppsWhitelist.verifyTrustedApp(
-            packageInfo.packageName, certFingerprint
-        )
         val trustEvidence = trustEngine.collectEvidence(packageInfo, certFingerprint)
+
+        // Classify expected signer domain BEFORE cert comparison
+        val isApex = appInfo?.sourceDir?.startsWith("/apex/") == true
+        val signerDomain = TrustedAppsWhitelist.classifySignerDomain(
+            isSystemApp = scannedApp.isSystemApp,
+            isApex = isApex,
+            isPlatformSigned = trustEvidence.systemAppInfo.isPlatformSigned,
+            partition = trustEvidence.systemAppInfo.partition,
+            sourceDir = appInfo?.sourceDir
+        )
+
+        // Cert-vs-whitelist comparison — domain-aware
+        val trustVerification = TrustedAppsWhitelist.verifyTrustedApp(
+            packageInfo.packageName, certFingerprint, signerDomain
+        )
         
         // ── 2. Collect permission + component data for baseline ──
         val installerPkg = trustEvidence.installerInfo.installerPackage
@@ -528,21 +542,64 @@ class AppSecurityScanner @Inject constructor(
             }
         }
         
-        // Cert mismatch (HARD)
+        // ── Cert verification findings (domain-aware) ──
         if (trustVerification.reason == TrustedAppsWhitelist.TrustReason.UNKNOWN_CERT) {
-            val title = "Může jít o neoficiální verzi"
+            if (TrustedAppsWhitelist.isExpectedSignerMismatch(signerDomain)) {
+                // System / APEX / OEM domain: cert not matching Play Store key is EXPECTED.
+                // Generate a SOFT informational finding — never triggers R1 CRITICAL.
+                val title = "Systémový podpis (ne Play Store)"
+                issues.add(AppSecurityIssue(
+                    id = "sig_not_play_${packageInfo.packageName}",
+                    title = title,
+                    description = "${scannedApp.appName} je podepsána systémovým/APEX klíčem, ne Play Store klíčem.",
+                    impact = "Očekávaný stav pro systémovou komponentu.",
+                    category = IssueCategory.SIGNATURE,
+                    severity = RiskLevel.LOW,
+                    isExpertOnly = true, // Don't show to regular users
+                    action = IssueAction.None
+                ))
+                rawFindings.add(TrustRiskModel.RawFinding(
+                    TrustRiskModel.FindingType.NOT_PLAY_SIGNED, RiskLevel.LOW, title, ""
+                ))
+            } else {
+                // PLAY_SIGNED or UNKNOWN domain: cert mismatch is a real HARD finding
+                val title = "Může jít o neoficiální verzi"
+                issues.add(AppSecurityIssue(
+                    id = "sig_resigned_${packageInfo.packageName}",
+                    title = title,
+                    description = "${scannedApp.appName} tvrdí, že pochází od známého vývojáře, ale její podpis neodpovídá.",
+                    impact = "Tato aplikace mohla být upravena třetí stranou.",
+                    category = IssueCategory.SIGNATURE,
+                    severity = RiskLevel.HIGH,
+                    action = IssueAction.OpenPlayStore(packageInfo.packageName, "Přeinstalovat z Play Store"),
+                    technicalDetails = "Cert: ${certFingerprint.take(16)}..."
+                ))
+                rawFindings.add(TrustRiskModel.RawFinding(
+                    TrustRiskModel.FindingType.SIGNATURE_MISMATCH, RiskLevel.HIGH, title, ""
+                ))
+            }
+        }
+
+        // ── Partition / sourceDir anomaly (system integrity check) ──
+        val partitionAnomaly = TrustedAppsWhitelist.detectPartitionAnomaly(
+            packageName = packageInfo.packageName,
+            isSystemApp = scannedApp.isSystemApp,
+            sourceDir = appInfo?.sourceDir,
+            partition = trustEvidence.systemAppInfo.partition
+        )
+        if (partitionAnomaly != null) {
+            val title = "Neočekávané umístění systémové komponenty"
             issues.add(AppSecurityIssue(
-                id = "sig_resigned_${packageInfo.packageName}",
+                id = "sig_partition_${packageInfo.packageName}",
                 title = title,
-                description = "${scannedApp.appName} tvrdí, že pochází od známého vývojáře, ale její podpis neodpovídá.",
-                impact = "Tato aplikace mohla být upravena třetí stranou.",
+                description = partitionAnomaly,
+                impact = "Systémová komponenta běží z neočekávaného umístění — může jít o neautorizovanou modifikaci.",
                 category = IssueCategory.SIGNATURE,
                 severity = RiskLevel.HIGH,
-                action = IssueAction.OpenPlayStore(packageInfo.packageName, "Přeinstalovat z Play Store"),
-                technicalDetails = "Cert: ${certFingerprint.take(16)}..."
+                action = IssueAction.None
             ))
             rawFindings.add(TrustRiskModel.RawFinding(
-                TrustRiskModel.FindingType.SIGNATURE_MISMATCH, RiskLevel.HIGH, title, ""
+                TrustRiskModel.FindingType.PARTITION_ANOMALY, RiskLevel.HIGH, title, partitionAnomaly
             ))
         }
         

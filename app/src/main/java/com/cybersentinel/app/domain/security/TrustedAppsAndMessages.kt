@@ -19,9 +19,112 @@ package com.cybersentinel.app.domain.security
  * - APIs consumed by TrustEvidenceEngine
  */
 object TrustedAppsWhitelist {
-    
+
+    // ══════════════════════════════════════════════════════════
+    //  Trust domains — separates signing authority contexts
+    // ══════════════════════════════════════════════════════════
+
+    /**
+     * Signing authority domain for a package.
+     *
+     * The same package prefix (e.g. "com.google.") can be signed by
+     * completely different keys depending on whether it is a Play Store
+     * app, a platform component, or an updatable APEX module.
+     * Comparing an APEX cert against a Play Store cert is meaningless
+     * and produces false-positive SIGNATURE_MISMATCH findings.
+     *
+     * TrustDomain tells the scanner **which key set** to compare against
+     * — or whether comparison is even meaningful.
+     */
+    enum class TrustDomain {
+        /** User-space app signed via Google Play App Signing / third-party store */
+        PLAY_SIGNED,
+        /** Signed with the device platform key (sharedUserId=android, framework) */
+        PLATFORM_SIGNED,
+        /** Updatable mainline module delivered via /apex/ */
+        APEX_MODULE,
+        /** OEM/vendor partition component (signed with OEM key, not platform) */
+        OEM_VENDOR,
+        /** Cannot determine signing domain */
+        UNKNOWN
+    }
+
+    /**
+     * Classify the expected signer domain for a package.
+     *
+     * This does NOT look at the actual cert — it infers the *expected*
+     * signing authority from the package's install location, flags and
+     * partition.  The scanner uses this to decide whether a cert-vs-
+     * whitelist comparison is even meaningful.
+     */
+    fun classifySignerDomain(
+        isSystemApp: Boolean,
+        isApex: Boolean,
+        isPlatformSigned: Boolean,
+        partition: TrustEvidenceEngine.AppPartition,
+        sourceDir: String? = null
+    ): TrustDomain = when {
+        // APEX modules: dedicated module key, never matches Play cert
+        isApex || sourceDir?.startsWith("/apex/") == true -> TrustDomain.APEX_MODULE
+        // Platform-signed (sharedUserId=android): platform key
+        isPlatformSigned -> TrustDomain.PLATFORM_SIGNED
+        // Vendor / product partition but NOT platform-signed: OEM key
+        isSystemApp && partition in setOf(
+            TrustEvidenceEngine.AppPartition.VENDOR,
+            TrustEvidenceEngine.AppPartition.PRODUCT
+        ) -> TrustDomain.OEM_VENDOR
+        // System app on /system partition but not platform-signed:
+        // could be Google-signed system app (GMS) — still not Play cert
+        isSystemApp && partition == TrustEvidenceEngine.AppPartition.SYSTEM -> TrustDomain.PLATFORM_SIGNED
+        // System app with unknown partition (emulator / APEX fallback)
+        isSystemApp -> TrustDomain.PLATFORM_SIGNED
+        // User-space app (installed from store or sideloaded)
+        else -> TrustDomain.PLAY_SIGNED
+    }
+
+    /**
+     * Is it expected that this package's cert does NOT match the Play Store
+     * developer whitelist?
+     *
+     * Returns `true` when cert-vs-whitelist comparison is meaningless
+     * (platform / APEX / OEM domain).  A mismatch in these domains is
+     * normal and should NOT produce a HARD finding.
+     */
+    fun isExpectedSignerMismatch(domain: TrustDomain): Boolean =
+        domain != TrustDomain.PLAY_SIGNED && domain != TrustDomain.UNKNOWN
+
+    /**
+     * Detect partition / sourceDir anomalies that indicate a potentially
+     * tampered system component.
+     *
+     * Returns a human-readable anomaly description, or `null` if clean.
+     */
+    fun detectPartitionAnomaly(
+        packageName: String,
+        isSystemApp: Boolean,
+        sourceDir: String?,
+        partition: TrustEvidenceEngine.AppPartition
+    ): String? {
+        if (!isSystemApp) return null
+
+        // System app whose APK lives in /data/app → may have been overlaid
+        // by a sideloaded version (common attack vector).
+        if (sourceDir?.startsWith("/data/app") == true) {
+            return "Systémová komponenta $packageName běží z /data/app místo systémového oddílu — " +
+                    "může jít o neautorizovanou náhradu"
+        }
+
+        // FLAG_SYSTEM set but partition is DATA → suspicious
+        if (partition == TrustEvidenceEngine.AppPartition.DATA) {
+            return "Systémová komponenta $packageName je na datovém oddílu — " +
+                    "neočekávané umístění"
+        }
+
+        return null
+    }
+
     // ──────────────────────────────────────────────────────────
-    //  Developer certs (prefix-based matching)
+    //  Developer certs (prefix-based matching — PLAY_SIGNED domain only)
     // ──────────────────────────────────────────────────────────
 
     data class DeveloperEntry(
@@ -29,17 +132,28 @@ object TrustedAppsWhitelist {
         /** All known cert digests (current + historical for rotation) */
         val certDigests: Set<String>,
         /** Package prefixes this developer owns */
-        val packagePrefixes: Set<String>
+        val packagePrefixes: Set<String>,
+        /**
+         * Trust domain this entry applies to.  Default = PLAY_SIGNED.
+         * Cert comparison is only meaningful when the app's actual domain
+         * matches this entry's domain.
+         */
+        val domain: TrustDomain = TrustDomain.PLAY_SIGNED
     )
 
     private val trustedDevelopers = listOf(
+        // Google Play-signed apps (GMS, Play Store apps)
+        // NOTE: com.android.* prefix is intentionally NOT listed here.
+        // System/APEX packages under com.android.* are PLATFORM_SIGNED or
+        // APEX_MODULE — comparing them against this Play cert is wrong.
         DeveloperEntry(
             name = "Google",
             certDigests = setOf(
                 "38918A453D07199354F8B19AF05EC6562CED5788"
                 // Add rotated/historical Google certs here
             ),
-            packagePrefixes = setOf("com.google.", "com.android.")
+            packagePrefixes = setOf("com.google."),
+            domain = TrustDomain.PLAY_SIGNED
         ),
         DeveloperEntry(
             name = "Meta",
@@ -116,24 +230,37 @@ object TrustedAppsWhitelist {
     data class DeveloperCertMatch(
         val developerName: String,
         val expectedCert: String,
-        val certMatches: Boolean
+        val certMatches: Boolean,
+        /** The trust domain of the matching entry */
+        val entryDomain: TrustDomain = TrustDomain.PLAY_SIGNED
     )
 
     /**
      * Match a package name against developer cert entries.
      * Returns null if package doesn't match any developer prefix.
+     *
+     * When [callerDomain] is provided, only entries whose domain matches
+     * are considered.  This prevents comparing a PLATFORM_SIGNED app's
+     * cert against a PLAY_SIGNED entry (which would always "mismatch").
      */
-    fun matchDeveloperCert(packageName: String, certPrefix: String): DeveloperCertMatch? {
+    fun matchDeveloperCert(
+        packageName: String,
+        certPrefix: String,
+        callerDomain: TrustDomain? = null
+    ): DeveloperCertMatch? {
         for (dev in trustedDevelopers) {
             val matchesPrefix = dev.packagePrefixes.any { packageName.startsWith(it) }
             if (matchesPrefix) {
+                // If caller specified a domain, skip entries from different domains
+                if (callerDomain != null && dev.domain != callerDomain) continue
                 val certMatches = dev.certDigests.any { knownCert ->
                     certPrefix.startsWith(knownCert) || knownCert.startsWith(certPrefix)
                 }
                 return DeveloperCertMatch(
                     developerName = dev.name,
                     expectedCert = dev.certDigests.first(), // Primary cert
-                    certMatches = certMatches
+                    certMatches = certMatches,
+                    entryDomain = dev.domain
                 )
             }
         }
@@ -157,7 +284,11 @@ object TrustedAppsWhitelist {
         UNKNOWN_PACKAGE
     }
 
-    fun verifyTrustedApp(packageName: String, certSha256: String): TrustVerification {
+    fun verifyTrustedApp(
+        packageName: String,
+        certSha256: String,
+        signerDomain: TrustDomain = TrustDomain.PLAY_SIGNED
+    ): TrustVerification {
         val certPrefix = certSha256.take(40).uppercase()
         
         // 1. Check individual verified apps (now with rotation support)
@@ -174,7 +305,8 @@ object TrustedAppsWhitelist {
         }
         
         // 2. Check developer certificate + package prefix
-        val devMatch = matchDeveloperCert(packageName, certPrefix)
+        //    Pass signerDomain so non-PLAY domains skip PLAY-only entries
+        val devMatch = matchDeveloperCert(packageName, certPrefix, signerDomain)
         if (devMatch != null) {
             return if (devMatch.certMatches) {
                 TrustVerification(true, TrustReason.VERIFIED_DEVELOPER_CERT, devMatch.developerName)

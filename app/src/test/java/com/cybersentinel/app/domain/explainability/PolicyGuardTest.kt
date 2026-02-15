@@ -139,7 +139,7 @@ class PolicyGuardTest {
             severity = IncidentSeverity.CRITICAL,
             events = listOf(
                 makeEvent(EventType.SUSPICIOUS_UPDATE, listOf(
-                    makeSignal(SignalType.CERT_CHANGE, SignalSeverity.CRITICAL), // → SIGNATURE_MISMATCH = HARD
+                    makeSignal(SignalType.CERT_CHANGE, SignalSeverity.CRITICAL), // → SIGNATURE_DRIFT = HARD
                     makeSignal(SignalType.HIGH_RISK_PERM_ADDED, SignalSeverity.HIGH) // HARD
                 ))
             ),
@@ -397,7 +397,7 @@ class PolicyGuardTest {
             )
         )
         val hardTypes = policyGuard.extractHardFindingTypes(incident)
-        assertTrue(TrustRiskModel.FindingType.SIGNATURE_MISMATCH in hardTypes)
+        assertTrue(TrustRiskModel.FindingType.SIGNATURE_DRIFT in hardTypes)
         assertTrue(TrustRiskModel.FindingType.VERSION_ROLLBACK in hardTypes)
         assertFalse(TrustRiskModel.FindingType.SUSPICIOUS_NATIVE_LIB in hardTypes) // WEAK_SIGNAL
     }

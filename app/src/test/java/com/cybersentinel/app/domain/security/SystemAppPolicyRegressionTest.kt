@@ -789,4 +789,369 @@ class SystemAppPolicyRegressionTest {
         )
         assertEquals(TrustRiskModel.EffectiveRisk.SAFE, verdict.effectiveRisk)
     }
+
+    // ════════════════════════════════════════════════════════════
+    //  11. TrustDomain classification (signing domain awareness)
+    // ════════════════════════════════════════════════════════════
+
+    @Test
+    fun `TrustDomain - APEX module from apex sourceDir`() {
+        val domain = TrustedAppsWhitelist.classifySignerDomain(
+            isSystemApp = true, isApex = true, isPlatformSigned = false,
+            partition = TrustEvidenceEngine.AppPartition.SYSTEM,
+            sourceDir = "/apex/com.android.tethering/app/InProcessTethering"
+        )
+        assertEquals(TrustedAppsWhitelist.TrustDomain.APEX_MODULE, domain)
+    }
+
+    @Test
+    fun `TrustDomain - APEX module detected by isApex flag alone`() {
+        val domain = TrustedAppsWhitelist.classifySignerDomain(
+            isSystemApp = true, isApex = true, isPlatformSigned = false,
+            partition = TrustEvidenceEngine.AppPartition.SYSTEM
+        )
+        assertEquals(TrustedAppsWhitelist.TrustDomain.APEX_MODULE, domain)
+    }
+
+    @Test
+    fun `TrustDomain - platform-signed system app`() {
+        val domain = TrustedAppsWhitelist.classifySignerDomain(
+            isSystemApp = true, isApex = false, isPlatformSigned = true,
+            partition = TrustEvidenceEngine.AppPartition.SYSTEM
+        )
+        assertEquals(TrustedAppsWhitelist.TrustDomain.PLATFORM_SIGNED, domain)
+    }
+
+    @Test
+    fun `TrustDomain - OEM vendor partition app`() {
+        val domain = TrustedAppsWhitelist.classifySignerDomain(
+            isSystemApp = true, isApex = false, isPlatformSigned = false,
+            partition = TrustEvidenceEngine.AppPartition.VENDOR
+        )
+        assertEquals(TrustedAppsWhitelist.TrustDomain.OEM_VENDOR, domain)
+    }
+
+    @Test
+    fun `TrustDomain - OEM product partition app`() {
+        val domain = TrustedAppsWhitelist.classifySignerDomain(
+            isSystemApp = true, isApex = false, isPlatformSigned = false,
+            partition = TrustEvidenceEngine.AppPartition.PRODUCT
+        )
+        assertEquals(TrustedAppsWhitelist.TrustDomain.OEM_VENDOR, domain)
+    }
+
+    @Test
+    fun `TrustDomain - user-installed app = PLAY_SIGNED`() {
+        val domain = TrustedAppsWhitelist.classifySignerDomain(
+            isSystemApp = false, isApex = false, isPlatformSigned = false,
+            partition = TrustEvidenceEngine.AppPartition.DATA
+        )
+        assertEquals(TrustedAppsWhitelist.TrustDomain.PLAY_SIGNED, domain)
+    }
+
+    @Test
+    fun `TrustDomain - system app on SYSTEM partition without platform key`() {
+        // GMS-like app on /system but not platform-signed
+        val domain = TrustedAppsWhitelist.classifySignerDomain(
+            isSystemApp = true, isApex = false, isPlatformSigned = false,
+            partition = TrustEvidenceEngine.AppPartition.SYSTEM
+        )
+        assertEquals(
+            "System app on SYSTEM partition should still be PLATFORM_SIGNED domain",
+            TrustedAppsWhitelist.TrustDomain.PLATFORM_SIGNED, domain
+        )
+    }
+
+    // ════════════════════════════════════════════════════════════
+    //  12. isExpectedSignerMismatch
+    // ════════════════════════════════════════════════════════════
+
+    @Test
+    fun `isExpectedSignerMismatch - PLATFORM_SIGNED = true`() {
+        assertTrue(TrustedAppsWhitelist.isExpectedSignerMismatch(TrustedAppsWhitelist.TrustDomain.PLATFORM_SIGNED))
+    }
+
+    @Test
+    fun `isExpectedSignerMismatch - APEX_MODULE = true`() {
+        assertTrue(TrustedAppsWhitelist.isExpectedSignerMismatch(TrustedAppsWhitelist.TrustDomain.APEX_MODULE))
+    }
+
+    @Test
+    fun `isExpectedSignerMismatch - OEM_VENDOR = true`() {
+        assertTrue(TrustedAppsWhitelist.isExpectedSignerMismatch(TrustedAppsWhitelist.TrustDomain.OEM_VENDOR))
+    }
+
+    @Test
+    fun `isExpectedSignerMismatch - PLAY_SIGNED = false`() {
+        assertFalse(TrustedAppsWhitelist.isExpectedSignerMismatch(TrustedAppsWhitelist.TrustDomain.PLAY_SIGNED))
+    }
+
+    @Test
+    fun `isExpectedSignerMismatch - UNKNOWN = false`() {
+        assertFalse(TrustedAppsWhitelist.isExpectedSignerMismatch(TrustedAppsWhitelist.TrustDomain.UNKNOWN))
+    }
+
+    // ════════════════════════════════════════════════════════════
+    //  13. detectPartitionAnomaly
+    // ════════════════════════════════════════════════════════════
+
+    @Test
+    fun `detectPartitionAnomaly - system app in data-app = anomaly`() {
+        val result = TrustedAppsWhitelist.detectPartitionAnomaly(
+            "com.android.phone", isSystemApp = true,
+            sourceDir = "/data/app/com.android.phone-123/base.apk",
+            partition = TrustEvidenceEngine.AppPartition.SYSTEM
+        )
+        assertNotNull("System app in /data/app should be flagged", result)
+    }
+
+    @Test
+    fun `detectPartitionAnomaly - system app on DATA partition = anomaly`() {
+        val result = TrustedAppsWhitelist.detectPartitionAnomaly(
+            "com.android.phone", isSystemApp = true,
+            sourceDir = "/system/app/Phone/Phone.apk",
+            partition = TrustEvidenceEngine.AppPartition.DATA
+        )
+        assertNotNull("System app on DATA partition should be flagged", result)
+    }
+
+    @Test
+    fun `detectPartitionAnomaly - system app on SYSTEM partition = clean`() {
+        val result = TrustedAppsWhitelist.detectPartitionAnomaly(
+            "com.android.phone", isSystemApp = true,
+            sourceDir = "/system/app/Phone/Phone.apk",
+            partition = TrustEvidenceEngine.AppPartition.SYSTEM
+        )
+        assertNull("Normal system app should have no anomaly", result)
+    }
+
+    @Test
+    fun `detectPartitionAnomaly - user app is always null`() {
+        val result = TrustedAppsWhitelist.detectPartitionAnomaly(
+            "com.example.app", isSystemApp = false,
+            sourceDir = "/data/app/com.example.app-1/base.apk",
+            partition = TrustEvidenceEngine.AppPartition.DATA
+        )
+        assertNull("User app in /data/app is normal, should not flag", result)
+    }
+
+    // ════════════════════════════════════════════════════════════
+    //  14. Domain-aware cert findings: NOT_PLAY_SIGNED → SAFE for system
+    // ════════════════════════════════════════════════════════════
+
+    @Test
+    fun `SAFE - system app with NOT_PLAY_SIGNED only (APEX cert is expected)`() {
+        val verdict = model.evaluate(
+            packageName = "com.android.tethering",
+            trustEvidence = systemTrust("com.android.tethering"),
+            rawFindings = listOf(
+                finding(TrustRiskModel.FindingType.NOT_PLAY_SIGNED, AppSecurityScanner.RiskLevel.LOW)
+            ),
+            isSystemApp = true,
+            installClass = TrustRiskModel.InstallClass.SYSTEM_PREINSTALLED
+        )
+        assertEquals(
+            "NOT_PLAY_SIGNED is SOFT + hygiene-suppressed for SYSTEM → SAFE",
+            TrustRiskModel.EffectiveRisk.SAFE,
+            verdict.effectiveRisk
+        )
+    }
+
+    @Test
+    fun `SAFE - system app with NOT_PLAY_SIGNED AND hygiene stacked`() {
+        val verdict = model.evaluate(
+            packageName = "com.google.android.ext.services",
+            trustEvidence = systemTrust("com.google.android.ext.services"),
+            rawFindings = listOf(
+                finding(TrustRiskModel.FindingType.NOT_PLAY_SIGNED, AppSecurityScanner.RiskLevel.LOW),
+                finding(TrustRiskModel.FindingType.OLD_TARGET_SDK, AppSecurityScanner.RiskLevel.LOW),
+                finding(TrustRiskModel.FindingType.EXPORTED_COMPONENTS, AppSecurityScanner.RiskLevel.LOW)
+            ),
+            isSystemApp = true,
+            installClass = TrustRiskModel.InstallClass.SYSTEM_PREINSTALLED
+        )
+        assertEquals(
+            "NOT_PLAY_SIGNED + hygiene should all be suppressed for SYSTEM",
+            TrustRiskModel.EffectiveRisk.SAFE,
+            verdict.effectiveRisk
+        )
+    }
+
+    // ════════════════════════════════════════════════════════════
+    //  15. SIGNATURE_DRIFT (real baseline cert change) → CRITICAL
+    // ════════════════════════════════════════════════════════════
+
+    @Test
+    fun `CRITICAL - system app with SIGNATURE_DRIFT (real cert change vs baseline)`() {
+        val verdict = model.evaluate(
+            packageName = "com.android.phone",
+            trustEvidence = systemTrust("com.android.phone"),
+            rawFindings = listOf(
+                finding(TrustRiskModel.FindingType.SIGNATURE_DRIFT, AppSecurityScanner.RiskLevel.CRITICAL)
+            ),
+            isSystemApp = true,
+            installClass = TrustRiskModel.InstallClass.SYSTEM_PREINSTALLED
+        )
+        assertEquals(
+            "SIGNATURE_DRIFT is HARD — real cert change must be CRITICAL even for system apps",
+            TrustRiskModel.EffectiveRisk.CRITICAL,
+            verdict.effectiveRisk
+        )
+    }
+
+    @Test
+    fun `CRITICAL - user app with SIGNATURE_DRIFT`() {
+        val verdict = model.evaluate(
+            packageName = "com.example.banking",
+            trustEvidence = userTrust("com.example.banking"),
+            rawFindings = listOf(
+                finding(TrustRiskModel.FindingType.SIGNATURE_DRIFT, AppSecurityScanner.RiskLevel.CRITICAL)
+            ),
+            isSystemApp = false,
+            installClass = TrustRiskModel.InstallClass.USER_INSTALLED
+        )
+        assertEquals(
+            "SIGNATURE_DRIFT is HARD for USER apps too",
+            TrustRiskModel.EffectiveRisk.CRITICAL,
+            verdict.effectiveRisk
+        )
+    }
+
+    // ════════════════════════════════════════════════════════════
+    //  16. PARTITION_ANOMALY → CRITICAL
+    // ════════════════════════════════════════════════════════════
+
+    @Test
+    fun `CRITICAL - system app with PARTITION_ANOMALY (sourceDir in data-app)`() {
+        val verdict = model.evaluate(
+            packageName = "com.android.phone",
+            trustEvidence = systemTrust("com.android.phone"),
+            rawFindings = listOf(
+                finding(TrustRiskModel.FindingType.PARTITION_ANOMALY, AppSecurityScanner.RiskLevel.HIGH)
+            ),
+            isSystemApp = true,
+            installClass = TrustRiskModel.InstallClass.SYSTEM_PREINSTALLED
+        )
+        assertEquals(
+            "PARTITION_ANOMALY is HARD — system app in wrong location is CRITICAL",
+            TrustRiskModel.EffectiveRisk.CRITICAL,
+            verdict.effectiveRisk
+        )
+    }
+
+    // ════════════════════════════════════════════════════════════
+    //  17. USER app with SIGNATURE_MISMATCH → still CRITICAL (unchanged)
+    // ════════════════════════════════════════════════════════════
+
+    @Test
+    fun `CRITICAL - USER app with SIGNATURE_MISMATCH (Play cert mismatch)`() {
+        val verdict = model.evaluate(
+            packageName = "com.example.suspicious",
+            trustEvidence = userTrust("com.example.suspicious", score = 20, level = TrustEvidenceEngine.TrustLevel.LOW),
+            rawFindings = listOf(
+                finding(TrustRiskModel.FindingType.SIGNATURE_MISMATCH, AppSecurityScanner.RiskLevel.CRITICAL)
+            ),
+            isSystemApp = false,
+            installClass = TrustRiskModel.InstallClass.USER_INSTALLED
+        )
+        assertEquals(
+            "USER apps with SIGNATURE_MISMATCH (Play domain) must remain CRITICAL",
+            TrustRiskModel.EffectiveRisk.CRITICAL,
+            verdict.effectiveRisk
+        )
+    }
+
+    // ════════════════════════════════════════════════════════════
+    //  18. Population invariant: no system CRITICAL from cert-only findings
+    // ════════════════════════════════════════════════════════════
+
+    @Test
+    fun `population invariant - 100 system apps with NOT_PLAY_SIGNED produce ZERO critical`() {
+        var criticalCount = 0
+        var needsAttentionCount = 0
+
+        (1..100).forEach { i ->
+            val verdict = model.evaluate(
+                packageName = "com.android.system$i",
+                trustEvidence = systemTrust("com.android.system$i"),
+                rawFindings = listOf(
+                    finding(TrustRiskModel.FindingType.NOT_PLAY_SIGNED, AppSecurityScanner.RiskLevel.LOW)
+                ),
+                isSystemApp = true,
+                installClass = TrustRiskModel.InstallClass.SYSTEM_PREINSTALLED
+            )
+            when (verdict.effectiveRisk) {
+                TrustRiskModel.EffectiveRisk.CRITICAL -> criticalCount++
+                TrustRiskModel.EffectiveRisk.NEEDS_ATTENTION -> needsAttentionCount++
+                else -> {}
+            }
+        }
+
+        assertEquals(
+            "NO system app should be CRITICAL from NOT_PLAY_SIGNED alone",
+            0, criticalCount
+        )
+        assertEquals(
+            "NO system app should be NEEDS_ATTENTION from NOT_PLAY_SIGNED alone",
+            0, needsAttentionCount
+        )
+    }
+
+    @Test
+    fun `population invariant - system fleet with NOT_PLAY_SIGNED plus hygiene is 100pct SAFE`() {
+        val safeCount = (1..50).count { i ->
+            val verdict = model.evaluate(
+                packageName = "com.android.sysapp$i",
+                trustEvidence = systemTrust("com.android.sysapp$i"),
+                rawFindings = listOf(
+                    finding(TrustRiskModel.FindingType.NOT_PLAY_SIGNED, AppSecurityScanner.RiskLevel.LOW),
+                    finding(TrustRiskModel.FindingType.OLD_TARGET_SDK, AppSecurityScanner.RiskLevel.LOW),
+                    finding(TrustRiskModel.FindingType.EXPORTED_COMPONENTS, AppSecurityScanner.RiskLevel.LOW)
+                ),
+                isSystemApp = true,
+                installClass = TrustRiskModel.InstallClass.SYSTEM_PREINSTALLED
+            )
+            verdict.effectiveRisk == TrustRiskModel.EffectiveRisk.SAFE
+        }
+        assertEquals(
+            "All system apps with NOT_PLAY_SIGNED + hygiene must be SAFE",
+            50, safeCount
+        )
+    }
+
+    // ════════════════════════════════════════════════════════════
+    //  19. FindingType hardness classification
+    // ════════════════════════════════════════════════════════════
+
+    @Test
+    fun `FindingType hardness - NOT_PLAY_SIGNED is SOFT`() {
+        assertEquals(
+            TrustRiskModel.FindingHardness.SOFT,
+            TrustRiskModel.FindingType.NOT_PLAY_SIGNED.hardness
+        )
+    }
+
+    @Test
+    fun `FindingType hardness - SIGNATURE_DRIFT is HARD`() {
+        assertEquals(
+            TrustRiskModel.FindingHardness.HARD,
+            TrustRiskModel.FindingType.SIGNATURE_DRIFT.hardness
+        )
+    }
+
+    @Test
+    fun `FindingType hardness - PARTITION_ANOMALY is HARD`() {
+        assertEquals(
+            TrustRiskModel.FindingHardness.HARD,
+            TrustRiskModel.FindingType.PARTITION_ANOMALY.hardness
+        )
+    }
+
+    @Test
+    fun `FindingType hardness - SIGNATURE_MISMATCH is still HARD`() {
+        assertEquals(
+            TrustRiskModel.FindingHardness.HARD,
+            TrustRiskModel.FindingType.SIGNATURE_MISMATCH.hardness
+        )
+    }
 }

@@ -109,6 +109,8 @@ class TrustRiskModel @Inject constructor() {
         // ── HARD findings (never suppressed, always override category/trust) ──
         DEBUG_SIGNATURE(FindingHardness.HARD),
         SIGNATURE_MISMATCH(FindingHardness.HARD),
+        /** Signing cert changed vs baseline — integrity drift. HARD regardless of domain. */
+        SIGNATURE_DRIFT(FindingHardness.HARD),
         BASELINE_SIGNATURE_CHANGE(FindingHardness.HARD),
         BASELINE_NEW_SYSTEM_APP(FindingHardness.HARD),
         INTEGRITY_FAIL_WITH_HOOKING(FindingHardness.HARD),
@@ -123,6 +125,14 @@ class TrustRiskModel @Inject constructor() {
         // ── SOFT findings (trust-adjustable) ──
         OVER_PRIVILEGED(FindingHardness.SOFT),
         OLD_TARGET_SDK(FindingHardness.SOFT),
+        /**
+         * App is not signed with the Play Store key but that is EXPECTED
+         * for its trust domain (platform / APEX / OEM).  Informational only.
+         * Never triggers R1 hard-finding rule because hardness = SOFT.
+         */
+        NOT_PLAY_SIGNED(FindingHardness.SOFT),
+        /** System component running from unexpected partition (e.g. /data/app) */
+        PARTITION_ANOMALY(FindingHardness.HARD),
         
         // ── Change findings (baseline delta — severity depends on context) ──
         /** High-risk permission added between scans — HARD */
@@ -607,6 +617,8 @@ class TrustRiskModel @Inject constructor() {
                         FindingType.OVER_PRIVILEGED -> if (policyProfile == PolicyProfile.SYSTEM) 0 else 3
                         FindingType.EXPORTED_SURFACE_INCREASED -> if (policyProfile == PolicyProfile.SYSTEM) 1 else 3
                         FindingType.INSTALLER_ANOMALY_VERIFIED -> if (policyProfile == PolicyProfile.SYSTEM) 0 else 2
+                        // NOT_PLAY_SIGNED: zero weight for SYSTEM (expected), low for USER
+                        FindingType.NOT_PLAY_SIGNED -> if (policyProfile == PolicyProfile.SYSTEM) 0 else 2
                         else -> 3
                     }
                     FindingHardness.WEAK_SIGNAL -> when (f.findingType) {
@@ -659,6 +671,22 @@ class TrustRiskModel @Inject constructor() {
             // ── SAFE tier ──
             // R11: Everything else (including expected clusters, privacy caps)
             else -> EffectiveRisk.SAFE
+        }
+
+        // ── Determine which rule triggered ──
+        val triggerRule = when {
+            hasHardFindings -> "R1:HARD_FINDING"
+            isAnomalous -> "R2:ANOMALOUS_TRUST"
+            highestComboSeverity >= AppSecurityScanner.RiskLevel.CRITICAL.score -> "R3:CRIT_COMBO"
+            highestComboSeverity >= AppSecurityScanner.RiskLevel.HIGH.score -> "R4:HIGH_COMBO"
+            installerChangedWithHighRisk -> "R4b:INSTALLER_CHANGED_HIGHRISK"
+            hasHighRiskPermAdded && isLowTrust -> "R5:HIGHRISK_PERM_LOWT"
+            isLowTrust && hasUnexpectedHighRiskCluster && hasExtraSignal -> "R6:LOWT_CLUSTER_SIGNAL"
+            hasHighRiskPermAdded -> "R7:HIGHRISK_PERM"
+            hasSurfaceIncrease && isLowTrust -> "R8:SURFACE_LOWT"
+            hasUnexpectedHighRiskCluster && !isHighTrust -> "R9:UNEXPECTED_CLUSTER"
+            meaningfulFindingWeight >= infoThreshold -> "R10:WEIGHTED_THRESHOLD(w=$meaningfulFindingWeight,t=$infoThreshold)"
+            else -> "R11:SAFE_DEFAULT"
         }
 
         // System apps: show in main list only on genuine concerns
@@ -762,7 +790,9 @@ class TrustRiskModel @Inject constructor() {
                 FindingType.OVER_PRIVILEGED,
                 FindingType.EXPORTED_COMPONENTS,
                 FindingType.HIGH_RISK_CAPABILITY,
-                FindingType.INSTALLER_ANOMALY_VERIFIED
+                FindingType.INSTALLER_ANOMALY_VERIFIED,
+                // NOT_PLAY_SIGNED is expected for system/APEX — always suppress
+                FindingType.NOT_PLAY_SIGNED
             )
             if (isHygieneFinding) {
                 return AdjustedFinding(
