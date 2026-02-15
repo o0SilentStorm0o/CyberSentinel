@@ -179,6 +179,23 @@ object ActionIntentMapper {
         }
     }
 
+    /**
+     * Fallback instruction when canResolve() returns false — guides user manually.
+     */
+    fun getFallbackText(category: ActionCategory): String {
+        return when (category) {
+            ActionCategory.UNINSTALL -> "Otevřete Nastavení → Aplikace → vyberte aplikaci → Odinstalovat."
+            ActionCategory.DISABLE -> "Otevřete Nastavení → Aplikace → vyberte aplikaci → Zakázat."
+            ActionCategory.REVOKE_PERMISSION -> "Otevřete Nastavení → Aplikace → Oprávnění a zkontrolujte přístupy."
+            ActionCategory.REVOKE_SPECIAL_ACCESS -> "Otevřete Nastavení → Speciální přístupy aplikací."
+            ActionCategory.CHECK_SETTINGS -> "Otevřete Nastavení → Zabezpečení."
+            ActionCategory.REINSTALL_FROM_STORE -> "Otevřete obchod Google Play a vyhledejte aplikaci."
+            ActionCategory.FACTORY_RESET -> "Otevřete Nastavení → Systém → Obnovení továrního nastavení."
+            ActionCategory.MONITOR -> "Sledujte chování aplikace v běžném provozu."
+            ActionCategory.INFORM -> "Informujte se o tomto bezpečnostním problému."
+        }
+    }
+
     /** Settings constant for notification listener settings. */
     private const val NOTIFICATION_LISTENER_SETTINGS =
         "android.settings.ACTION_NOTIFICATION_LISTENER_SETTINGS"

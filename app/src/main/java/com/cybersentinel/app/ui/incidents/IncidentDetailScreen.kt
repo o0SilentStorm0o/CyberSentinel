@@ -1,5 +1,7 @@
 package com.cybersentinel.app.ui.incidents
 
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.layout.*
@@ -8,6 +10,7 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Warning
@@ -39,7 +42,8 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 @Composable
 fun IncidentDetailScreen(
     viewModel: IncidentDetailViewModel = hiltViewModel(),
-    onBack: () -> Unit = {}
+    onBack: () -> Unit = {},
+    onNavigateToAiStatus: () -> Unit = {}
 ) {
     val ui by viewModel.ui.collectAsStateWithLifecycle()
     val context = LocalContext.current
@@ -90,6 +94,7 @@ fun IncidentDetailScreen(
                         gateBlockReason = ui.gateBlockReason,
                         onExplain = { viewModel.requestExplanation() },
                         onCancelExplain = { viewModel.cancelExplanation() },
+                        onNavigateToAiStatus = onNavigateToAiStatus,
                         context = context
                     )
                 }
@@ -106,6 +111,7 @@ private fun DetailContent(
     gateBlockReason: String?,
     onExplain: () -> Unit,
     onCancelExplain: () -> Unit,
+    onNavigateToAiStatus: () -> Unit,
     context: Context
 ) {
     LazyColumn(
@@ -168,7 +174,7 @@ private fun DetailContent(
 
         // Section 5: "Technické detaily" (collapsed)
         item {
-            TechnicalDetailsSection(detail.technicalDetails)
+            TechnicalDetailsSection(detail.technicalDetails, context)
         }
 
         // "Vysvětlit" button + explanation state
@@ -180,7 +186,8 @@ private fun DetailContent(
                 canExplainWithAi = canExplainWithAi,
                 gateBlockReason = gateBlockReason,
                 onExplain = onExplain,
-                onCancel = onCancelExplain
+                onCancel = onCancelExplain,
+                onNavigateToAiStatus = onNavigateToAiStatus
             )
         }
     }
@@ -336,19 +343,23 @@ private fun ActionRow(action: ActionUiModel, context: Context) {
                 val canResolve = remember(intent) {
                     ActionIntentMapper.canResolve(context, intent)
                 }
-                Button(
-                    onClick = {
-                        if (canResolve) {
-                            context.startActivity(intent)
-                        }
-                    },
-                    enabled = canResolve,
-                    colors = if (action.isUrgent)
-                        ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
-                    else
-                        ButtonDefaults.buttonColors()
-                ) {
-                    Text(ActionIntentMapper.getActionLabel(action.actionCategory))
+                if (canResolve) {
+                    Button(
+                        onClick = { context.startActivity(intent) },
+                        colors = if (action.isUrgent)
+                            ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+                        else
+                            ButtonDefaults.buttonColors()
+                    ) {
+                        Text(ActionIntentMapper.getActionLabel(action.actionCategory))
+                    }
+                } else {
+                    // Fallback: intent exists but can't be resolved on this device
+                    Text(
+                        text = ActionIntentMapper.getFallbackText(action.actionCategory),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.outline
+                    )
                 }
             }
         }
@@ -360,8 +371,9 @@ private fun ActionRow(action: ActionUiModel, context: Context) {
 // ──────────────────────────────────────────────────────────
 
 @Composable
-private fun TechnicalDetailsSection(tech: TechnicalDetailsModel) {
+private fun TechnicalDetailsSection(tech: TechnicalDetailsModel, context: Context) {
     var expanded by remember { mutableStateOf(false) }
+    var copiedSnackbar by remember { mutableStateOf(false) }
 
     Card(
         shape = RoundedCornerShape(12.dp),
@@ -380,12 +392,39 @@ private fun TechnicalDetailsSection(tech: TechnicalDetailsModel) {
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.Bold
                 )
-                IconButton(onClick = { expanded = !expanded }) {
-                    Icon(
-                        imageVector = if (expanded) Icons.Default.KeyboardArrowUp
-                        else Icons.Default.KeyboardArrowDown,
-                        contentDescription = if (expanded) "Sbalit" else "Rozbalit"
-                    )
+                Row {
+                    // Copy diagnostics button
+                    IconButton(onClick = {
+                        val text = buildDiagnosticsText(tech)
+                        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                        clipboard.setPrimaryClip(ClipData.newPlainText("CyberSentinel diagnostika", text))
+                        copiedSnackbar = true
+                    }) {
+                        Icon(
+                            imageVector = Icons.Default.ContentCopy,
+                            contentDescription = "Kopírovat diagnostiku",
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+                    IconButton(onClick = { expanded = !expanded }) {
+                        Icon(
+                            imageVector = if (expanded) Icons.Default.KeyboardArrowUp
+                            else Icons.Default.KeyboardArrowDown,
+                            contentDescription = if (expanded) "Sbalit" else "Rozbalit"
+                        )
+                    }
+                }
+            }
+
+            if (copiedSnackbar) {
+                Text(
+                    text = "✅ Diagnostika zkopírována",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary
+                )
+                LaunchedEffect(Unit) {
+                    kotlinx.coroutines.delay(2000)
+                    copiedSnackbar = false
                 }
             }
 
@@ -448,7 +487,8 @@ private fun ExplanationSection(
     canExplainWithAi: Boolean,
     gateBlockReason: String?,
     onExplain: () -> Unit,
-    onCancel: () -> Unit
+    onCancel: () -> Unit,
+    onNavigateToAiStatus: () -> Unit
 ) {
     Card(
         shape = RoundedCornerShape(12.dp),
@@ -471,13 +511,17 @@ private fun ExplanationSection(
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.outline
                         )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        TextButton(onClick = onNavigateToAiStatus) {
+                            Text("Otevřít AI & Model →")
+                        }
                     }
                     Spacer(modifier = Modifier.height(8.dp))
                     Button(
                         onClick = onExplain,
                         enabled = canExplainWithAi
                     ) {
-                        Text("Vysvětlit")
+                        Text("Vysvětlit pomocí AI")
                     }
                 }
 
@@ -513,14 +557,14 @@ private fun ExplanationSection(
                     }
                     if (isBusyFallback) {
                         Text(
-                            text = "⚡ Šablonové vysvětlení (AI zaneprázdněná)",
+                            text = "⚡ AI byla zaneprázdněná — zobrazujeme šablonové vysvětlení.",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.outline
                         )
                     }
                     Spacer(modifier = Modifier.height(8.dp))
                     OutlinedButton(onClick = onExplain) {
-                        Text("Vysvětlit znovu")
+                        Text("Vysvětlit znovu pomocí AI")
                     }
                 }
 
@@ -538,4 +582,34 @@ private fun ExplanationSection(
             }
         }
     }
+}
+
+// ──────────────────────────────────────────────────────────
+//  Diagnostics clipboard helper
+// ──────────────────────────────────────────────────────────
+
+/**
+ * Build a plain-text diagnostics dump for clipboard / bug reports.
+ * Visible for testing.
+ */
+internal fun buildDiagnosticsText(tech: TechnicalDetailsModel): String {
+    return buildString {
+        appendLine("=== CyberSentinel — Diagnostika ===")
+        if (tech.hypotheses.isNotEmpty()) {
+            appendLine("\nHypotézy:")
+            tech.hypotheses.forEach { appendLine("  • $it") }
+        }
+        if (tech.signals.isNotEmpty()) {
+            appendLine("\nSignály:")
+            tech.signals.forEach { appendLine("  • $it") }
+        }
+        if (tech.affectedPackages.isNotEmpty()) {
+            appendLine("\nDotčené balíčky:")
+            tech.affectedPackages.forEach { appendLine("  • $it") }
+        }
+        if (tech.metadata.isNotEmpty()) {
+            appendLine("\nMetadata:")
+            tech.metadata.forEach { (k, v) -> appendLine("  $k: $v") }
+        }
+    }.trimEnd()
 }

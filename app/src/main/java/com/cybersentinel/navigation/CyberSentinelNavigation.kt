@@ -97,14 +97,20 @@ fun CyberSentinelNavigation(
                 arguments = listOf(navArgument("eventId") { type = NavType.StringType })
             ) {
                 IncidentDetailScreen(
-                    onBack = { navController.popBackStack() }
+                    onBack = { navController.popBackStack() },
+                    onNavigateToAiStatus = {
+                        navController.navigate(Screen.AiStatus.route)
+                    }
                 )
             }
 
             composable(Screen.AiStatus.route) {
                 AiStatusScreen(
                     onBack = { navController.popBackStack() },
-                    onRunSelfTest = { /* TODO: wire LlmSelfTestRunner */ }
+                    onRunSelfTest = {
+                        // Self-test runs inside AiStatusViewModel.runSelfTest()
+                        // triggered by the screen's OutlinedButton → ViewModel.onSelfTestStarted()
+                    }
                 )
             }
         }

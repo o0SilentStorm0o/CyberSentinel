@@ -172,5 +172,41 @@ data class AiStatusUiModel(
     /** True if self-test is currently running */
     val isSelfTesting: Boolean = false,
     /** Download error message, if any */
-    val downloadError: String? = null
+    val downloadError: String? = null,
+    /** True if download is in progress (for cancel button) */
+    val isDownloading: Boolean = false,
+    /** Benchmark metrics from last self-test, if available */
+    val benchmarkMetrics: BenchmarkMetricsUi? = null
+)
+
+/**
+ * User-facing benchmark metrics — only decision-relevant values.
+ * "Advanced" metrics are available but shown collapsed.
+ */
+data class BenchmarkMetricsUi(
+    /** Overall production readiness */
+    val isProductionReady: Boolean,
+    /** Health score 0-100 */
+    val healthScore: Int,
+    /** Average inference latency in ms */
+    val avgLatencyMs: Long,
+    /** 95th percentile latency in ms */
+    val p95LatencyMs: Long,
+    /** Schema compliance rate as percent 0-100 */
+    val reliabilityPercent: Int,
+    /** Policy violation rate as percent */
+    val policyViolationPercent: Float,
+    /** Peak native heap in MB, null if not measured */
+    val peakHeapMb: Long?,
+    /** Total benchmark runs */
+    val totalRuns: Int,
+    // ── Advanced (collapsed) ──
+    val p99LatencyMs: Long,
+    val avgTokensPerSecond: Float,
+    val templateFallbackPercent: Int,
+    val stopFailurePercent: Float,
+    val avgGeneratedTokens: Float,
+    val maxGeneratedTokens: Int,
+    val oomCount: Int,
+    val timeoutCount: Int
 )

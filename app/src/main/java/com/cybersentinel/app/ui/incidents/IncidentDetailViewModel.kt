@@ -170,17 +170,9 @@ class IncidentDetailViewModel @Inject constructor(
 
     /**
      * Human-readable reason for gate denial (Czech).
+     * Uses shared static method for consistency with AI & Model screen.
      */
     private fun gateReasonLabel(rule: GateRule): String {
-        return when (rule) {
-            GateRule.TIER_BLOCKED -> "Zařízení nemá dostatečný výkon pro AI"
-            GateRule.KILL_SWITCH -> "AI model byl zakázán"
-            GateRule.USER_DISABLED -> "AI je vypnuté v nastavení"
-            GateRule.LOW_RAM -> "Nedostatek paměti RAM"
-            GateRule.POWER_SAVER -> "Režim úspory energie je aktivní"
-            GateRule.THERMAL_THROTTLE -> "Zařízení se přehřívá"
-            GateRule.BACKGROUND_RESTRICTED -> "Aplikace běží na pozadí"
-            GateRule.ALLOWED -> "Vše v pořádku"
-        }
+        return AiStatusViewModel.gateReasonLabelStatic(rule)
     }
 }

@@ -7,12 +7,15 @@ import androidx.lifecycle.viewModelScope
 import com.cybersentinel.app.domain.capability.FeatureGatekeeper
 import com.cybersentinel.app.domain.capability.GateRule
 import com.cybersentinel.app.domain.explainability.ExplanationOrchestrator
+import com.cybersentinel.app.domain.llm.LlmBenchmarkResult
+import com.cybersentinel.app.domain.llm.LlmSelfTestRunner
 import com.cybersentinel.app.domain.llm.ModelManager
 import com.cybersentinel.app.domain.llm.ModelManifest
 import com.cybersentinel.app.domain.llm.ModelOperationResult
 import com.cybersentinel.app.domain.llm.ModelState
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -23,12 +26,12 @@ import java.io.File
 import javax.inject.Inject
 
 /**
- * AiStatusViewModel — drives the "AI & Model" status/settings screen.
+ * AiStatusViewModel — drives the "AI & Model" control panel screen.
  *
- * Shows: model state, capability tier, gate status, self-test results,
- * kill switch state, user toggle.
+ * Full lifecycle: Download → (auto-load) → Self-test → Ready
+ * Cancel download, remove model, re-download on failure.
  *
- * Sprint UI-2: 5/10 — real download/remove/self-test wiring.
+ * Sprint UI-3: Complete control panel with self-test integration + metrics.
  */
 @HiltViewModel
 class AiStatusViewModel @Inject constructor(
@@ -43,8 +46,10 @@ class AiStatusViewModel @Inject constructor(
     /** Last self-test summary (if any) */
     private var lastSelfTestSummary: String? = null
     private var lastSelfTestReady: Boolean? = null
+    private var lastBenchmarkResult: LlmBenchmarkResult? = null
     private var isDownloading = false
     private var isSelfTesting = false
+    private var downloadJob: Job? = null
 
     init {
         refresh()
@@ -71,9 +76,9 @@ class AiStatusViewModel @Inject constructor(
         if (isDownloading) return
 
         isDownloading = true
-        _ui.update { it.copy(downloadProgress = 0f) }
+        _ui.update { it.copy(downloadProgress = 0f, downloadError = null) }
 
-        viewModelScope.launch {
+        downloadJob = viewModelScope.launch {
             val result = withContext(Dispatchers.IO) {
                 modelManager.downloadModel(
                     manifest = getDefaultManifest(),
@@ -88,6 +93,7 @@ class AiStatusViewModel @Inject constructor(
             }
 
             isDownloading = false
+            downloadJob = null
             when (result) {
                 is ModelOperationResult.Success -> {
                     refresh()
@@ -99,6 +105,18 @@ class AiStatusViewModel @Inject constructor(
         }
     }
 
+    /**
+     * Cancel an in-progress download and clean up partial files.
+     */
+    fun onCancelDownload() {
+        downloadJob?.cancel()
+        downloadJob = null
+        isDownloading = false
+        // ModelManager will leave partial file; we just reset UI
+        _ui.update { it.copy(downloadProgress = null, downloadError = null) }
+        refresh()
+    }
+
     // ══════════════════════════════════════════════════════════
     //  Remove model
     // ══════════════════════════════════════════════════════════
@@ -107,7 +125,19 @@ class AiStatusViewModel @Inject constructor(
         modelManager.deleteModel()
         lastSelfTestReady = null
         lastSelfTestSummary = null
+        lastBenchmarkResult = null
         refresh()
+    }
+
+    /**
+     * Remove and re-download in one action (for failed/corrupted models).
+     */
+    fun onRedownloadClick(targetDir: File) {
+        modelManager.deleteModel()
+        lastSelfTestReady = null
+        lastSelfTestSummary = null
+        lastBenchmarkResult = null
+        onDownloadClick(targetDir)
     }
 
     // ══════════════════════════════════════════════════════════
@@ -115,7 +145,47 @@ class AiStatusViewModel @Inject constructor(
     // ══════════════════════════════════════════════════════════
 
     /**
-     * Store self-test results from LlmSelfTestRunner (called by whoever runs the test).
+     * Run self-test in ViewModel scope using the provided runner.
+     * This is the primary entry point — runs on IO dispatcher.
+     */
+    fun runSelfTest(runner: LlmSelfTestRunner) {
+        if (isSelfTesting) return
+        isSelfTesting = true
+        refresh()
+
+        viewModelScope.launch {
+            try {
+                val result = withContext(Dispatchers.IO) {
+                    runner.runSmokeTest(
+                        modelId = getDefaultManifest().modelId,
+                        modelVersion = getDefaultManifest().version
+                    )
+                }
+                // Also run a fuller benchmark for metrics display
+                val benchmarkResult = withContext(Dispatchers.IO) {
+                    runner.runBenchmark(
+                        runs = 10,
+                        modelId = getDefaultManifest().modelId,
+                        modelVersion = getDefaultManifest().version
+                    )
+                }
+
+                lastSelfTestReady = benchmarkResult.isProductionReady
+                lastSelfTestSummary = benchmarkResult.summary
+                lastBenchmarkResult = benchmarkResult
+            } catch (e: Exception) {
+                lastSelfTestReady = false
+                lastSelfTestSummary = "Self-test selhal: ${e.message}"
+                lastBenchmarkResult = null
+            } finally {
+                isSelfTesting = false
+                refresh()
+            }
+        }
+    }
+
+    /**
+     * Store self-test results from external runner (backward compat).
      */
     fun onSelfTestCompleted(isProductionReady: Boolean, summary: String) {
         lastSelfTestReady = isProductionReady
@@ -135,18 +205,45 @@ class AiStatusViewModel @Inject constructor(
 
     /**
      * Human-readable reason for a gate rule (Czech).
+     * Consistent with IncidentDetailViewModel.gateReasonLabel().
      */
     internal fun gateReasonLabel(rule: GateRule): String {
-        return when (rule) {
-            GateRule.TIER_BLOCKED -> "Zařízení nemá dostatečný výkon pro AI"
-            GateRule.KILL_SWITCH -> "AI model byl zakázán administrátorem"
-            GateRule.USER_DISABLED -> "AI je vypnuté uživatelem"
-            GateRule.LOW_RAM -> "Nedostatek paměti RAM"
-            GateRule.POWER_SAVER -> "Režim úspory energie je aktivní"
-            GateRule.THERMAL_THROTTLE -> "Zařízení se přehřívá"
-            GateRule.BACKGROUND_RESTRICTED -> "Aplikace běží na pozadí"
-            GateRule.ALLOWED -> "Vše v pořádku"
-        }
+        return gateReasonLabelStatic(rule)
+    }
+
+    // ══════════════════════════════════════════════════════════
+    //  Metrics extraction
+    // ══════════════════════════════════════════════════════════
+
+    /**
+     * Extract user-facing metrics from benchmark result.
+     * Shows only decision-relevant metrics; rest goes into "advanced".
+     */
+    internal fun extractMetrics(result: LlmBenchmarkResult): BenchmarkMetricsUi {
+        val reliability = (result.quality.schemaComplianceRate * 100).toInt()
+        val policyViolationRate = if (result.totalRuns > 0)
+            (result.quality.policyViolationCount.toFloat() / result.totalRuns * 100) else 0f
+
+        return BenchmarkMetricsUi(
+            isProductionReady = result.isProductionReady,
+            healthScore = (result.healthScore * 100).toInt(),
+            avgLatencyMs = result.latency.avgMs,
+            p95LatencyMs = result.latency.p95Ms,
+            reliabilityPercent = reliability,
+            policyViolationPercent = policyViolationRate,
+            peakHeapMb = if (result.peakNativeHeapBytes > 0)
+                result.peakNativeHeapBytes / (1024 * 1024) else null,
+            totalRuns = result.totalRuns,
+            // Advanced metrics
+            p99LatencyMs = result.latency.p99Ms,
+            avgTokensPerSecond = result.latency.avgTokensPerSecond,
+            templateFallbackPercent = (result.pipeline.templateFallbackRate * 100).toInt(),
+            stopFailurePercent = (result.stopFailureRate * 100),
+            avgGeneratedTokens = result.avgGeneratedTokens,
+            maxGeneratedTokens = result.maxGeneratedTokens,
+            oomCount = result.stability.oomCount,
+            timeoutCount = result.stability.timeoutCount
+        )
     }
 
     // ══════════════════════════════════════════════════════════
@@ -172,6 +269,8 @@ class AiStatusViewModel @Inject constructor(
             stat.availableBlocksLong * stat.blockSizeLong / (1024 * 1024)
         } catch (_: Exception) { null }
 
+        val metrics = lastBenchmarkResult?.let { extractMetrics(it) }
+
         return AiStatusUiModel(
             modelStateLabel = modelStateLabel,
             tierLabel = tier.label,
@@ -188,14 +287,16 @@ class AiStatusViewModel @Inject constructor(
             canDownload = modelState == ModelState.NOT_DOWNLOADED || modelState == ModelState.CORRUPTED,
             canRemove = modelState == ModelState.READY || modelState == ModelState.LOADED,
             isSelfTesting = isSelfTesting,
-            downloadError = null
+            downloadError = _ui.value.downloadError,
+            isDownloading = isDownloading,
+            benchmarkMetrics = metrics
         )
     }
 
     /**
      * Default model manifest for MVP. In production, this comes from remote config.
      */
-    private fun getDefaultManifest() = ModelManifest(
+    internal fun getDefaultManifest() = ModelManifest(
         modelId = "cybersentinel-v1",
         displayName = "CyberSentinel AI v1",
         version = "1.0.0",
@@ -205,4 +306,24 @@ class AiStatusViewModel @Inject constructor(
         requires64Bit = true,
         quantization = "Q4_K_M"
     )
+
+    companion object {
+        /**
+         * Shared gate reason label — used by both AiStatusViewModel
+         * and IncidentDetailViewModel for consistency.
+         */
+        fun gateReasonLabelStatic(rule: GateRule): String {
+            return when (rule) {
+                GateRule.TIER_BLOCKED ->
+                    "AI je dostupná pouze na arm64 zařízeních (emulátor/x86 není podporován)"
+                GateRule.KILL_SWITCH -> "AI model byl zakázán administrátorem"
+                GateRule.USER_DISABLED -> "AI je vypnuté uživatelem v nastavení"
+                GateRule.LOW_RAM -> "Nedostatek paměti RAM pro AI inferenci"
+                GateRule.POWER_SAVER -> "Režim úspory energie je aktivní"
+                GateRule.THERMAL_THROTTLE -> "Zařízení se přehřívá — AI je pozastavena"
+                GateRule.BACKGROUND_RESTRICTED -> "Aplikace běží na pozadí — AI šetří prostředky"
+                GateRule.ALLOWED -> "AI je připravena k použití"
+            }
+        }
+    }
 }
