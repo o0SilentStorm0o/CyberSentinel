@@ -193,8 +193,33 @@ class TrustEvidenceEngine @Inject constructor(
         val reasons = mutableListOf<TrustReason>()
         var score = 0
 
+        // 0. System app status — must be evaluated FIRST so we can
+        //    determine the signer domain before cert comparison.
+        val systemInfo = checkSystemAppStatus(packageInfo)
+        if (systemInfo.isSystemApp) {
+            score += 15
+            reasons.add(TrustReason("Systémová aplikace (${systemInfo.partition.label()})", 15, true))
+        }
+        if (systemInfo.isPlatformSigned) {
+            score += 15
+            reasons.add(TrustReason("Podepsána platformovým klíčem", 15, true))
+        }
+
+        // Determine signer domain so cert comparison is domain-aware.
+        // A PLATFORM_SIGNED system app must not be compared against a
+        // PLAY_SIGNED developer whitelist entry — that always "mismatches".
+        val sourceDir = packageInfo.applicationInfo?.sourceDir
+        val isApex = sourceDir?.startsWith("/apex/") == true
+        val signerDomain = TrustedAppsWhitelist.classifySignerDomain(
+            isSystemApp = systemInfo.isSystemApp,
+            isApex = isApex,
+            isPlatformSigned = systemInfo.isPlatformSigned,
+            partition = systemInfo.partition,
+            sourceDir = sourceDir
+        )
+
         // 1. Certificate match against known trusted apps/developers
-        val certMatch = verifyCertificate(packageInfo.packageName, certSha256)
+        val certMatch = verifyCertificate(packageInfo.packageName, certSha256, signerDomain)
         when (certMatch.matchType) {
             CertMatchType.DEVELOPER_MATCH -> {
                 score += 30
@@ -225,16 +250,7 @@ class TrustEvidenceEngine @Inject constructor(
             reasons.add(TrustReason("Nainstalováno mimo obchod (sideload)", -5, false))
         }
 
-        // 3. System app status
-        val systemInfo = checkSystemAppStatus(packageInfo)
-        if (systemInfo.isSystemApp) {
-            score += 15
-            reasons.add(TrustReason("Systémová aplikace (${systemInfo.partition.label()})", 15, true))
-        }
-        if (systemInfo.isPlatformSigned) {
-            score += 15
-            reasons.add(TrustReason("Podepsána platformovým klíčem", 15, true))
-        }
+        // 3. (System app status already evaluated in step 0)
 
         // 4. Signing lineage (key rotation)
         val lineage = checkSigningLineage(packageInfo)
@@ -292,7 +308,11 @@ class TrustEvidenceEngine @Inject constructor(
     //  Private — Certificate verification
     // ──────────────────────────────────────────────────────────
 
-    private fun verifyCertificate(packageName: String, certSha256: String): CertMatchResult {
+    private fun verifyCertificate(
+        packageName: String,
+        certSha256: String,
+        signerDomain: TrustedAppsWhitelist.TrustDomain = TrustedAppsWhitelist.TrustDomain.PLAY_SIGNED
+    ): CertMatchResult {
         val certPrefix = certSha256.take(40).uppercase()
 
         // Check individual verified apps (with rotation support — multiple allowed digests)
@@ -309,8 +329,10 @@ class TrustEvidenceEngine @Inject constructor(
             )
         }
 
-        // Check developer certs (prefix-based)
-        val developerMatch = TrustedAppsWhitelist.matchDeveloperCert(packageName, certPrefix)
+        // Check developer certs (prefix-based, domain-aware).
+        // Pass signerDomain so a PLATFORM_SIGNED app doesn't match against
+        // a PLAY_SIGNED developer entry (which would always "mismatch").
+        val developerMatch = TrustedAppsWhitelist.matchDeveloperCert(packageName, certPrefix, signerDomain)
         if (developerMatch != null) {
             return CertMatchResult(
                 matchType = if (developerMatch.certMatches) CertMatchType.DEVELOPER_MATCH else CertMatchType.CERT_MISMATCH,
@@ -320,6 +342,8 @@ class TrustEvidenceEngine @Inject constructor(
             )
         }
 
+        // No whitelist entry matched.  For non-PLAY domains (platform,
+        // APEX, OEM) this is expected — return UNKNOWN, not MISMATCH.
         return CertMatchResult(
             matchType = CertMatchType.UNKNOWN,
             matchedDeveloper = null,

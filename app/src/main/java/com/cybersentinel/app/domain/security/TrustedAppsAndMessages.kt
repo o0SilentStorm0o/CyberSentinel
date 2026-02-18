@@ -98,24 +98,33 @@ object TrustedAppsWhitelist {
      * tampered system component.
      *
      * Returns a human-readable anomaly description, or `null` if clean.
+     *
+     * [isUpdatedSystemApp] — `true` when `FLAG_UPDATED_SYSTEM_APP` is set,
+     * meaning the system app received an update via Play Store (or similar)
+     * and its APK now lives in /data/app.  This is completely normal for
+     * apps like Chrome, WebView, GMS, and Play Store itself.
      */
     fun detectPartitionAnomaly(
         packageName: String,
         isSystemApp: Boolean,
         sourceDir: String?,
-        partition: TrustEvidenceEngine.AppPartition
+        partition: TrustEvidenceEngine.AppPartition,
+        isUpdatedSystemApp: Boolean = false
     ): String? {
         if (!isSystemApp) return null
 
         // System app whose APK lives in /data/app → may have been overlaid
         // by a sideloaded version (common attack vector).
-        if (sourceDir?.startsWith("/data/app") == true) {
+        // EXCEPTION: FLAG_UPDATED_SYSTEM_APP means the system image copy
+        // was updated via Play Store — the /data/app overlay is legitimate.
+        if (sourceDir?.startsWith("/data/app") == true && !isUpdatedSystemApp) {
             return "Systémová komponenta $packageName běží z /data/app místo systémového oddílu — " +
                     "může jít o neautorizovanou náhradu"
         }
 
         // FLAG_SYSTEM set but partition is DATA → suspicious
-        if (partition == TrustEvidenceEngine.AppPartition.DATA) {
+        // Again skip if it's a legitimate Play-updated system app.
+        if (partition == TrustEvidenceEngine.AppPartition.DATA && !isUpdatedSystemApp) {
             return "Systémová komponenta $packageName je na datovém oddílu — " +
                     "neočekávané umístění"
         }

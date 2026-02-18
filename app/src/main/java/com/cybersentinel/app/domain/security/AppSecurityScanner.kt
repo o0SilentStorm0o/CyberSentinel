@@ -585,7 +585,8 @@ class AppSecurityScanner @Inject constructor(
             packageName = packageInfo.packageName,
             isSystemApp = scannedApp.isSystemApp,
             sourceDir = appInfo?.sourceDir,
-            partition = trustEvidence.systemAppInfo.partition
+            partition = trustEvidence.systemAppInfo.partition,
+            isUpdatedSystemApp = trustEvidence.systemAppInfo.isUpdatedSystemApp
         )
         if (partitionAnomaly != null) {
             val title = "Neočekávané umístění systémové komponenty"

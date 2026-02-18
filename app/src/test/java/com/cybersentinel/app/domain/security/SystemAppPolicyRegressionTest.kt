@@ -1154,4 +1154,179 @@ class SystemAppPolicyRegressionTest {
             TrustRiskModel.FindingType.SIGNATURE_MISMATCH.hardness
         )
     }
+
+    // ════════════════════════════════════════════════════════════
+    //  20. Domain-aware cert matching in TrustEvidenceEngine
+    //      (R2 false-positive prevention — verifyCertificate
+    //       now passes signerDomain to matchDeveloperCert)
+    // ════════════════════════════════════════════════════════════
+
+    @Test
+    fun `matchDeveloperCert with PLATFORM_SIGNED domain skips PLAY_SIGNED entries`() {
+        // Google dev entry is PLAY_SIGNED — a PLATFORM_SIGNED caller must NOT match it
+        val match = TrustedAppsWhitelist.matchDeveloperCert(
+            packageName = "com.google.android.ext.services",
+            certPrefix = "0000000000000000000000000000000000000000", // random cert
+            callerDomain = TrustedAppsWhitelist.TrustDomain.PLATFORM_SIGNED
+        )
+        // Should be null because Google entry is PLAY_SIGNED and caller is PLATFORM_SIGNED
+        assertNull("PLATFORM_SIGNED caller must not match PLAY_SIGNED dev entry", match)
+    }
+
+    @Test
+    fun `matchDeveloperCert without domain still matches Google entry`() {
+        // Without domain filter, Google dev entry CAN match (backward compat)
+        val match = TrustedAppsWhitelist.matchDeveloperCert(
+            packageName = "com.google.android.gms",
+            certPrefix = "38918A453D07199354F8B19AF05EC6562CED5788"
+        )
+        assertNotNull("Without domain filter, Google entry should match", match)
+        assertTrue("Cert should match", match!!.certMatches)
+    }
+
+    // ════════════════════════════════════════════════════════════
+    //  21. R2 ANOMALOUS_TRUST: behavior verification
+    // ════════════════════════════════════════════════════════════
+
+    @Test
+    fun `system app with ANOMALOUS trust and no hard findings = CRITICAL via R2`() {
+        val verdict = model.evaluate(
+            packageName = "com.test.suspicious",
+            trustEvidence = systemTrust(
+                packageName = "com.test.suspicious",
+                level = TrustEvidenceEngine.TrustLevel.ANOMALOUS,
+                score = 10
+            ),
+            rawFindings = listOf(
+                finding(TrustRiskModel.FindingType.NOT_PLAY_SIGNED, AppSecurityScanner.RiskLevel.LOW)
+            ),
+            isSystemApp = true,
+            installClass = TrustRiskModel.InstallClass.SYSTEM_PREINSTALLED
+        )
+        assertEquals(
+            "ANOMALOUS trust must still trigger R2→CRITICAL (the fix is upstream)",
+            TrustRiskModel.EffectiveRisk.CRITICAL,
+            verdict.effectiveRisk
+        )
+    }
+
+    @Test
+    fun `system app with HIGH trust after domain fix = SAFE`() {
+        val verdict = model.evaluate(
+            packageName = "com.google.android.ext.services",
+            trustEvidence = systemTrust(
+                packageName = "com.google.android.ext.services",
+                level = TrustEvidenceEngine.TrustLevel.HIGH,
+                score = 85
+            ),
+            rawFindings = listOf(
+                finding(TrustRiskModel.FindingType.NOT_PLAY_SIGNED, AppSecurityScanner.RiskLevel.LOW),
+                finding(TrustRiskModel.FindingType.EXPORTED_COMPONENTS, AppSecurityScanner.RiskLevel.LOW)
+            ),
+            isSystemApp = true,
+            installClass = TrustRiskModel.InstallClass.SYSTEM_PREINSTALLED
+        )
+        assertEquals(
+            "System app with HIGH trust + only hygiene findings should be SAFE",
+            TrustRiskModel.EffectiveRisk.SAFE,
+            verdict.effectiveRisk
+        )
+    }
+
+    // ════════════════════════════════════════════════════════════
+    //  22. PARTITION_ANOMALY: Play-updated system apps
+    // ════════════════════════════════════════════════════════════
+
+    @Test
+    fun `detectPartitionAnomaly - updated system app in data_app is NOT anomalous`() {
+        val anomaly = TrustedAppsWhitelist.detectPartitionAnomaly(
+            packageName = "com.android.chrome",
+            isSystemApp = true,
+            sourceDir = "/data/app/~~random/com.android.chrome-hash/base.apk",
+            partition = TrustEvidenceEngine.AppPartition.DATA,
+            isUpdatedSystemApp = true  // FLAG_UPDATED_SYSTEM_APP
+        )
+        assertNull("Play-updated system app in /data/app should NOT be flagged", anomaly)
+    }
+
+    @Test
+    fun `detectPartitionAnomaly - non-updated system app in data_app IS anomalous`() {
+        val anomaly = TrustedAppsWhitelist.detectPartitionAnomaly(
+            packageName = "com.suspicious.overlay",
+            isSystemApp = true,
+            sourceDir = "/data/app/~~random/com.suspicious.overlay-hash/base.apk",
+            partition = TrustEvidenceEngine.AppPartition.DATA,
+            isUpdatedSystemApp = false
+        )
+        assertNotNull("Non-updated system app in /data/app SHOULD be flagged", anomaly)
+    }
+
+    @Test
+    fun `genuine PARTITION_ANOMALY still escalates to CRITICAL`() {
+        val verdict = model.evaluate(
+            packageName = "com.suspicious.overlay",
+            trustEvidence = systemTrust("com.suspicious.overlay"),
+            rawFindings = listOf(
+                finding(TrustRiskModel.FindingType.PARTITION_ANOMALY, AppSecurityScanner.RiskLevel.HIGH)
+            ),
+            isSystemApp = true,
+            installClass = TrustRiskModel.InstallClass.SYSTEM_PREINSTALLED
+        )
+        assertEquals(
+            "Genuine PARTITION_ANOMALY must still be CRITICAL",
+            TrustRiskModel.EffectiveRisk.CRITICAL,
+            verdict.effectiveRisk
+        )
+    }
+
+    // ════════════════════════════════════════════════════════════
+    //  23. End-to-end population: 30 former CRITICALs → SAFE
+    // ════════════════════════════════════════════════════════════
+
+    @Test
+    fun `population - former R2 apps become SAFE when trust is HIGH after domain fix`() {
+        val r2Packages = listOf(
+            "com.google.android.ext.services",
+            "com.google.android.networkstack.tethering",
+            "com.google.android.permissioncontroller",
+            "com.google.android.gms.supervision",
+            "com.google.android.gsf"
+        )
+        val safeCount = r2Packages.count { pkg ->
+            val verdict = model.evaluate(
+                packageName = pkg,
+                trustEvidence = systemTrust(pkg, score = 85, level = TrustEvidenceEngine.TrustLevel.HIGH),
+                rawFindings = listOf(
+                    finding(TrustRiskModel.FindingType.NOT_PLAY_SIGNED, AppSecurityScanner.RiskLevel.LOW)
+                ),
+                isSystemApp = true,
+                installClass = TrustRiskModel.InstallClass.SYSTEM_PREINSTALLED
+            )
+            verdict.effectiveRisk == TrustRiskModel.EffectiveRisk.SAFE
+        }
+        assertEquals("All former R2 apps should be SAFE with HIGH trust", r2Packages.size, safeCount)
+    }
+
+    @Test
+    fun `population - former R1 apps become SAFE when no PARTITION_ANOMALY finding`() {
+        val r1Packages = listOf(
+            "com.android.vending",
+            "com.google.android.webview",
+            "com.android.chrome",
+            "com.google.android.gms"
+        )
+        val safeCount = r1Packages.count { pkg ->
+            val verdict = model.evaluate(
+                packageName = pkg,
+                trustEvidence = systemTrust(pkg),
+                rawFindings = listOf(
+                    finding(TrustRiskModel.FindingType.EXPORTED_COMPONENTS, AppSecurityScanner.RiskLevel.LOW)
+                ),
+                isSystemApp = true,
+                installClass = TrustRiskModel.InstallClass.SYSTEM_PREINSTALLED
+            )
+            verdict.effectiveRisk == TrustRiskModel.EffectiveRisk.SAFE
+        }
+        assertEquals("All former R1 apps should be SAFE without PARTITION_ANOMALY", r1Packages.size, safeCount)
+    }
 }

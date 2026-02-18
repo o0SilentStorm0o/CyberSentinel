@@ -529,11 +529,13 @@ private fun AppReportCard(
     val isTrusted = report.trustVerification.isTrusted
     val developerName = report.trustVerification.developerName
     val trustLevel = report.trustEvidence.trustLevel
-    val trustBadge = when (trustLevel) {
-        TrustEvidenceEngine.TrustLevel.HIGH -> "✅"
-        TrustEvidenceEngine.TrustLevel.MODERATE -> "🟡"
-        TrustEvidenceEngine.TrustLevel.LOW -> "⚠️"
-        TrustEvidenceEngine.TrustLevel.ANOMALOUS -> "🚨"
+    val trustBadge = when {
+        trustLevel == TrustEvidenceEngine.TrustLevel.ANOMALOUS && report.app.isSystemApp -> "🔒"
+        trustLevel == TrustEvidenceEngine.TrustLevel.HIGH -> "✅"
+        trustLevel == TrustEvidenceEngine.TrustLevel.MODERATE -> "🟡"
+        trustLevel == TrustEvidenceEngine.TrustLevel.LOW -> "⚠️"
+        trustLevel == TrustEvidenceEngine.TrustLevel.ANOMALOUS -> "🚨"
+        else -> ""
     }
     
     Card(
@@ -705,21 +707,26 @@ private fun AppReportCard(
                     TrustRiskModel.EffectiveRisk.INFO -> "� Informace"
                     TrustRiskModel.EffectiveRisk.SAFE -> "🟢 Bezpečná"
                 }
-                val trustLabel = when (trustLevel) {
-                    TrustEvidenceEngine.TrustLevel.HIGH -> "Vysoká důvěra"
-                    TrustEvidenceEngine.TrustLevel.MODERATE -> "Střední důvěra"
-                    TrustEvidenceEngine.TrustLevel.LOW -> "Nízká důvěra"
-                    TrustEvidenceEngine.TrustLevel.ANOMALOUS -> "Podezřelé"
+                val trustLabel = when {
+                    trustLevel == TrustEvidenceEngine.TrustLevel.ANOMALOUS && report.app.isSystemApp ->
+                        "Neověřená systémová"
+                    trustLevel == TrustEvidenceEngine.TrustLevel.HIGH -> "Vysoká důvěra"
+                    trustLevel == TrustEvidenceEngine.TrustLevel.MODERATE -> "Střední důvěra"
+                    trustLevel == TrustEvidenceEngine.TrustLevel.LOW -> "Nízká důvěra"
+                    trustLevel == TrustEvidenceEngine.TrustLevel.ANOMALOUS -> "Podezřelé"
+                    else -> ""
                 }
-                val installerLabel = when (report.trustEvidence.installerInfo.installerType) {
-                    TrustEvidenceEngine.InstallerType.PLAY_STORE -> "Google Play"
-                    TrustEvidenceEngine.InstallerType.SAMSUNG_STORE -> "Galaxy Store"
-                    TrustEvidenceEngine.InstallerType.HUAWEI_APPGALLERY -> "AppGallery"
-                    TrustEvidenceEngine.InstallerType.AMAZON_APPSTORE -> "Amazon"
-                    TrustEvidenceEngine.InstallerType.SYSTEM_INSTALLER -> "Předinstalováno"
-                    TrustEvidenceEngine.InstallerType.MDM_INSTALLER -> "MDM"
-                    TrustEvidenceEngine.InstallerType.SIDELOADED -> "Sideload"
-                    TrustEvidenceEngine.InstallerType.UNKNOWN -> "Neznámý"
+                val installerLabel = when {
+                    report.trustEvidence.installerInfo.installerType == TrustEvidenceEngine.InstallerType.UNKNOWN
+                            && report.app.isSystemApp -> "Systémová součást"
+                    report.trustEvidence.installerInfo.installerType == TrustEvidenceEngine.InstallerType.PLAY_STORE -> "Google Play"
+                    report.trustEvidence.installerInfo.installerType == TrustEvidenceEngine.InstallerType.SAMSUNG_STORE -> "Galaxy Store"
+                    report.trustEvidence.installerInfo.installerType == TrustEvidenceEngine.InstallerType.HUAWEI_APPGALLERY -> "AppGallery"
+                    report.trustEvidence.installerInfo.installerType == TrustEvidenceEngine.InstallerType.AMAZON_APPSTORE -> "Amazon"
+                    report.trustEvidence.installerInfo.installerType == TrustEvidenceEngine.InstallerType.SYSTEM_INSTALLER -> "Předinstalováno"
+                    report.trustEvidence.installerInfo.installerType == TrustEvidenceEngine.InstallerType.MDM_INSTALLER -> "MDM"
+                    report.trustEvidence.installerInfo.installerType == TrustEvidenceEngine.InstallerType.SIDELOADED -> "Sideload"
+                    else -> "Neznámý"
                 }
                 Row(
                     modifier = Modifier.fillMaxWidth(),
