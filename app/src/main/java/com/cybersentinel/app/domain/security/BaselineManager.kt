@@ -129,6 +129,30 @@ class BaselineManager @Inject constructor(
     /**
      * Compare current app state against stored baseline.
      * Now includes permission delta and exported surface delta.
+     *
+     * ## Baseline initialization semantics
+     *
+     * **First scan** (`scanCount == 0`, `isFirstScan == true`):
+     *   The function creates the baseline entry. No anomalies are generated
+     *   except [AnomalyType.NEW_SYSTEM_APP] when this is a system app and
+     *   other baselines already exist (i.e. the app appeared between scans).
+     *
+     * **Subsequent scans** (`scanCount > 0`):
+     *   The function compares the current state against the stored baseline.
+     *   Anomalies (cert change, version rollback, installer switch, etc.)
+     *   are only detectable from the second scan onwards.
+     *
+     * **Security during first scan:**
+     *   The baseline cannot yet detect *change-based* anomalies. However,
+     *   the other two scan axes provide coverage:
+     *   - **Identity axis** ([TrustEvidenceEngine]): cert whitelist matching,
+     *     signer domain classification, platform signature verification
+     *   - **Capability axis** ([TrustRiskModel]): partition anomaly detection,
+     *     privilege analysis, category-based permission whitelisting
+     *
+     *   Together these ensure that even on the very first scan, a compromised
+     *   system component would be flagged by cert mismatch or partition anomaly
+     *   rather than relying on baseline drift detection.
      */
     suspend fun compareWithBaseline(
         packageName: String,

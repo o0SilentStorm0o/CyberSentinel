@@ -41,6 +41,15 @@ Monitors "hidden places" that attackers change silently:
 - Enabled accessibility/notification services
 - Default app changes, Developer options, USB debugging
 
+### App Baseline Engine (Change Detection Axis)
+Persists per-app state (cert, version, installer, permissions, exported surface) across scans:
+- **First scan** creates the baseline — no change-based anomalies possible yet
+- **Subsequent scans** detect drift: cert rotation, version rollback, installer switch, new high-risk permissions
+- First-scan security gap is covered by identity axis (cert whitelist, signer domain) and capability axis (partition anomaly, privilege analysis)
+- Anomalies are mapped through `AppSecurityScanner.mapBaselineAnomalyToFinding()` to the 3-axis model
+- HARD anomalies (cert change, version rollback, installer switch) → always CRITICAL, never suppressed
+- SOFT anomalies (version update, permission set change) → suppressed for system apps (hygiene rules)
+
 ### Incident Pipeline
 Standardized 3-level evidence model:
 ```
@@ -113,7 +122,7 @@ Structured knowledge base output transforming the scanner from "result producer"
 - **Networking:** Retrofit + Moshi
 - **Camera:** CameraX + ML Kit (barcode scanning)
 - **Background:** WorkManager
-- **Testing:** JUnit 4 (213 tests, 0 failures)
+- **Testing:** JUnit 4 (895 tests, 0 failures)
 
 ## Project Structure
 
@@ -151,7 +160,7 @@ app/src/main/java/com/cybersentinel/app/
 ./gradlew testDebugUnitTest
 ```
 
-**213 tests** across 10 test classes covering:
+**895 tests** across 10+ test classes covering:
 - TrustRiskModel (91 tests) — verdict logic, combo gating, trust tiers, category whitelist
 - AppCategoryDetector (29 tests) — category classification accuracy
 - BaselineManager (18 tests) — change detection, anomaly types
@@ -185,6 +194,8 @@ app/src/main/java/com/cybersentinel/app/
 | 4 | Red-team hardening, adversarial tests | 115 |
 | 5 | Release refinements (stalkerware, rollback, installer, scoring) | 139 |
 | 6 | Sleeping Sentinel prep (SpecialAccess, ConfigBaseline, Incidents, RootCause) | 213 |
+| 7 | System app alarm-wall fix + domain-aware trust model | 859 |
+| 8 | Negative tests, E2E pipeline, contract tests, static guards | 895 |
 
 ## License
 

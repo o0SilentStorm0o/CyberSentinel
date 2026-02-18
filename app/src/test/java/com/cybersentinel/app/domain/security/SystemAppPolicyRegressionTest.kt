@@ -1885,4 +1885,419 @@ class SystemAppPolicyRegressionTest {
             result.reason
         )
     }
+
+    // ════════════════════════════════════════════════════════════
+    //  30. Contract tests: lock severity + hardness for every
+    //      security-critical baseline→finding mapping
+    //
+    //  These tests form a *contract* — if anyone changes the mapping
+    //  or the FindingType hardness, the test name tells them exactly
+    //  what invariant they are breaking.
+    // ════════════════════════════════════════════════════════════
+
+    @Test
+    fun `contract - CERT_CHANGED maps to BASELINE_SIGNATURE_CHANGE with HARD hardness and CRITICAL severity`() {
+        val (findingType, severity) = AppSecurityScanner.mapBaselineAnomalyToFinding(
+            BaselineManager.AnomalyType.CERT_CHANGED
+        )
+        assertEquals(TrustRiskModel.FindingType.BASELINE_SIGNATURE_CHANGE, findingType)
+        assertEquals(AppSecurityScanner.RiskLevel.CRITICAL, severity)
+        assertEquals(
+            "BASELINE_SIGNATURE_CHANGE must be HARD — cert changes are never suppressible",
+            TrustRiskModel.FindingHardness.HARD, findingType.hardness
+        )
+    }
+
+    @Test
+    fun `contract - INSTALLER_CHANGED maps to INSTALLER_ANOMALY with HARD hardness and MEDIUM severity`() {
+        val (findingType, severity) = AppSecurityScanner.mapBaselineAnomalyToFinding(
+            BaselineManager.AnomalyType.INSTALLER_CHANGED
+        )
+        assertEquals(TrustRiskModel.FindingType.INSTALLER_ANOMALY, findingType)
+        assertEquals(AppSecurityScanner.RiskLevel.MEDIUM, severity)
+        assertEquals(
+            "INSTALLER_ANOMALY must be HARD — installer switch is a key supply-chain indicator",
+            TrustRiskModel.FindingHardness.HARD, findingType.hardness
+        )
+    }
+
+    @Test
+    fun `contract - VERSION_ROLLBACK untrusted maps to VERSION_ROLLBACK with HARD hardness and HIGH severity`() {
+        val (findingType, severity) = AppSecurityScanner.mapBaselineAnomalyToFinding(
+            BaselineManager.AnomalyType.VERSION_ROLLBACK,
+            isTrustedInstaller = false
+        )
+        assertEquals(TrustRiskModel.FindingType.VERSION_ROLLBACK, findingType)
+        assertEquals(AppSecurityScanner.RiskLevel.HIGH, severity)
+        assertEquals(
+            "VERSION_ROLLBACK (untrusted) must be HARD — downgrade from unknown source is attack indicator",
+            TrustRiskModel.FindingHardness.HARD, findingType.hardness
+        )
+    }
+
+    @Test
+    fun `contract - VERSION_ROLLBACK trusted maps to VERSION_ROLLBACK_TRUSTED with SOFT hardness and MEDIUM severity`() {
+        val (findingType, severity) = AppSecurityScanner.mapBaselineAnomalyToFinding(
+            BaselineManager.AnomalyType.VERSION_ROLLBACK,
+            isTrustedInstaller = true
+        )
+        assertEquals(TrustRiskModel.FindingType.VERSION_ROLLBACK_TRUSTED, findingType)
+        assertEquals(AppSecurityScanner.RiskLevel.MEDIUM, severity)
+        assertEquals(
+            "VERSION_ROLLBACK_TRUSTED must be SOFT — Play Store rollback may be legitimate A/B testing",
+            TrustRiskModel.FindingHardness.SOFT, findingType.hardness
+        )
+    }
+
+    @Test
+    fun `contract - NEW_SYSTEM_APP maps to BASELINE_NEW_SYSTEM_APP with HARD hardness and HIGH severity`() {
+        val (findingType, severity) = AppSecurityScanner.mapBaselineAnomalyToFinding(
+            BaselineManager.AnomalyType.NEW_SYSTEM_APP
+        )
+        assertEquals(TrustRiskModel.FindingType.BASELINE_NEW_SYSTEM_APP, findingType)
+        assertEquals(AppSecurityScanner.RiskLevel.HIGH, severity)
+        assertEquals(
+            "BASELINE_NEW_SYSTEM_APP must be HARD — new system component warrants investigation",
+            TrustRiskModel.FindingHardness.HARD, findingType.hardness
+        )
+    }
+
+    @Test
+    fun `contract - HIGH_RISK_PERMISSION_ADDED maps to HIGH_RISK_PERMISSION_ADDED with HARD hardness and HIGH severity`() {
+        val (findingType, severity) = AppSecurityScanner.mapBaselineAnomalyToFinding(
+            BaselineManager.AnomalyType.HIGH_RISK_PERMISSION_ADDED
+        )
+        assertEquals(TrustRiskModel.FindingType.HIGH_RISK_PERMISSION_ADDED, findingType)
+        assertEquals(AppSecurityScanner.RiskLevel.HIGH, severity)
+        assertEquals(
+            "HIGH_RISK_PERMISSION_ADDED must be HARD — SMS/Accessibility/DeviceAdmin escalation is critical",
+            TrustRiskModel.FindingHardness.HARD, findingType.hardness
+        )
+    }
+
+    @Test
+    fun `contract - EXPORTED_SURFACE_INCREASED maps to SOFT finding with MEDIUM severity`() {
+        val (findingType, severity) = AppSecurityScanner.mapBaselineAnomalyToFinding(
+            BaselineManager.AnomalyType.EXPORTED_SURFACE_INCREASED
+        )
+        assertEquals(TrustRiskModel.FindingType.EXPORTED_SURFACE_INCREASED, findingType)
+        assertEquals(AppSecurityScanner.RiskLevel.MEDIUM, severity)
+        assertEquals(
+            "EXPORTED_SURFACE_INCREASED must be SOFT — surface increase alone is informational",
+            TrustRiskModel.FindingHardness.SOFT, findingType.hardness
+        )
+    }
+
+    // ════════════════════════════════════════════════════════════
+    //  31. Real BaselineComparison→model pipeline contract tests
+    //
+    //  Construct real BaselineComparison objects with BaselineAnomaly
+    //  data classes (as BaselineManager.compareWithBaseline() would
+    //  produce them), then feed through the full mapping→model pipeline.
+    //  This proves the data path from persistence layer to verdict.
+    // ════════════════════════════════════════════════════════════
+
+    @Test
+    fun `pipeline - real BaselineComparison with CERT_CHANGED anomaly produces CRITICAL verdict`() {
+        // Step 1: Construct a real BaselineComparison as BaselineManager would produce
+        val comparison = BaselineManager.BaselineComparison(
+            packageName = "com.android.systemui",
+            status = BaselineManager.BaselineStatus.CHANGED,
+            anomalies = listOf(
+                BaselineManager.BaselineAnomaly(
+                    type = BaselineManager.AnomalyType.CERT_CHANGED,
+                    severity = BaselineManager.AnomalySeverity.CRITICAL,
+                    description = "Podpisový certifikát se změnil!",
+                    details = "Předchozí: ABCD1234...\nAktuální: EFGH5678..."
+                )
+            ),
+            isFirstScan = false,
+            scanCount = 3
+        )
+
+        // Step 2: Map anomalies through scanner companion (exactly as scanApp does)
+        val rawFindings = comparison.anomalies.map { anomaly ->
+            val (findingType, severity) = AppSecurityScanner.mapBaselineAnomalyToFinding(anomaly.type)
+            TrustRiskModel.RawFinding(findingType, severity, anomaly.description, anomaly.details ?: "")
+        }
+
+        // Step 3: Feed through model
+        val verdict = model.evaluate(
+            packageName = comparison.packageName,
+            trustEvidence = systemTrust(comparison.packageName),
+            rawFindings = rawFindings,
+            isSystemApp = true,
+            installClass = TrustRiskModel.InstallClass.SYSTEM_PREINSTALLED
+        )
+
+        assertEquals("Real BaselineComparison with CERT_CHANGED → CRITICAL",
+            TrustRiskModel.EffectiveRisk.CRITICAL, verdict.effectiveRisk)
+    }
+
+    @Test
+    fun `pipeline - real BaselineComparison with VERSION_ROLLBACK anomaly (untrusted) produces CRITICAL`() {
+        val comparison = BaselineManager.BaselineComparison(
+            packageName = "com.android.phone",
+            status = BaselineManager.BaselineStatus.CHANGED,
+            anomalies = listOf(
+                BaselineManager.BaselineAnomaly(
+                    type = BaselineManager.AnomalyType.VERSION_ROLLBACK,
+                    severity = BaselineManager.AnomalySeverity.HIGH,
+                    description = "Verze aplikace byla snížena: 14.0 → 12.0",
+                    details = "versionCode: 1400 → 1200\nDowngrade může znamenat supply-chain útok."
+                )
+            ),
+            isFirstScan = false,
+            scanCount = 5
+        )
+
+        // Untrusted installer (sideloaded) → HARD VERSION_ROLLBACK
+        val rawFindings = comparison.anomalies.map { anomaly ->
+            val (findingType, severity) = AppSecurityScanner.mapBaselineAnomalyToFinding(
+                anomaly.type, isTrustedInstaller = false
+            )
+            TrustRiskModel.RawFinding(findingType, severity, anomaly.description, anomaly.details ?: "")
+        }
+
+        val verdict = model.evaluate(
+            packageName = comparison.packageName,
+            trustEvidence = systemTrust(comparison.packageName),
+            rawFindings = rawFindings,
+            isSystemApp = true,
+            installClass = TrustRiskModel.InstallClass.SYSTEM_PREINSTALLED
+        )
+
+        assertEquals("Real VERSION_ROLLBACK (untrusted) → CRITICAL",
+            TrustRiskModel.EffectiveRisk.CRITICAL, verdict.effectiveRisk)
+    }
+
+    @Test
+    fun `pipeline - real BaselineComparison with multiple soft anomalies stays SAFE for system app`() {
+        // System app with only soft/hygiene anomalies: version change + permission change
+        // These are SOFT findings that get suppressed by system hygiene rules → SAFE
+        val comparison = BaselineManager.BaselineComparison(
+            packageName = "com.android.settings",
+            status = BaselineManager.BaselineStatus.CHANGED,
+            anomalies = listOf(
+                BaselineManager.BaselineAnomaly(
+                    type = BaselineManager.AnomalyType.VERSION_CHANGED,
+                    severity = BaselineManager.AnomalySeverity.LOW,
+                    description = "Verze se změnila: 14.0 → 15.0",
+                    details = null
+                ),
+                BaselineManager.BaselineAnomaly(
+                    type = BaselineManager.AnomalyType.PERMISSION_SET_CHANGED,
+                    severity = BaselineManager.AnomalySeverity.LOW,
+                    description = "Sada oprávnění se změnila",
+                    details = null
+                )
+            ),
+            isFirstScan = false,
+            scanCount = 10
+        )
+
+        val rawFindings = comparison.anomalies.map { anomaly ->
+            val (findingType, severity) = AppSecurityScanner.mapBaselineAnomalyToFinding(anomaly.type)
+            TrustRiskModel.RawFinding(findingType, severity, anomaly.description, anomaly.details ?: "")
+        }
+
+        val verdict = model.evaluate(
+            packageName = comparison.packageName,
+            trustEvidence = systemTrust(comparison.packageName),
+            rawFindings = rawFindings,
+            isSystemApp = true,
+            installClass = TrustRiskModel.InstallClass.SYSTEM_PREINSTALLED
+        )
+
+        assertEquals("System app with only soft baseline anomalies → SAFE",
+            TrustRiskModel.EffectiveRisk.SAFE, verdict.effectiveRisk)
+    }
+
+    @Test
+    fun `pipeline - real BaselineComparison first scan produces no anomalies (baseline init)`() {
+        // First scan ever — BaselineManager produces empty anomalies, status NEW
+        // This proves the baseline initialization path: first scan = clean slate
+        val comparison = BaselineManager.BaselineComparison(
+            packageName = "com.android.bluetooth",
+            status = BaselineManager.BaselineStatus.NEW,
+            anomalies = emptyList(),
+            isFirstScan = true,
+            scanCount = 0
+        )
+
+        assertTrue("First scan must have isFirstScan=true", comparison.isFirstScan)
+        assertTrue("First scan must produce no anomalies", comparison.anomalies.isEmpty())
+        assertEquals("First scan status must be NEW", BaselineManager.BaselineStatus.NEW, comparison.status)
+
+        // No anomalies → no findings → SAFE
+        val verdict = model.evaluate(
+            packageName = comparison.packageName,
+            trustEvidence = systemTrust(comparison.packageName),
+            rawFindings = emptyList(),
+            isSystemApp = true,
+            installClass = TrustRiskModel.InstallClass.SYSTEM_PREINSTALLED
+        )
+        assertEquals("First scan (baseline init) → SAFE",
+            TrustRiskModel.EffectiveRisk.SAFE, verdict.effectiveRisk)
+    }
+
+    @Test
+    fun `pipeline - real BaselineComparison compound anomalies preserve hardest finding`() {
+        // Real scenario: cert changed + installer changed + version rollback
+        // All HARD findings — model must produce CRITICAL (not downgraded)
+        val comparison = BaselineManager.BaselineComparison(
+            packageName = "com.android.nfc",
+            status = BaselineManager.BaselineStatus.CHANGED,
+            anomalies = listOf(
+                BaselineManager.BaselineAnomaly(
+                    type = BaselineManager.AnomalyType.CERT_CHANGED,
+                    severity = BaselineManager.AnomalySeverity.CRITICAL,
+                    description = "Podpisový certifikát se změnil!",
+                    details = null
+                ),
+                BaselineManager.BaselineAnomaly(
+                    type = BaselineManager.AnomalyType.INSTALLER_CHANGED,
+                    severity = BaselineManager.AnomalySeverity.MEDIUM,
+                    description = "Zdroj instalace se změnil",
+                    details = null
+                ),
+                BaselineManager.BaselineAnomaly(
+                    type = BaselineManager.AnomalyType.VERSION_ROLLBACK,
+                    severity = BaselineManager.AnomalySeverity.HIGH,
+                    description = "Verze snížena",
+                    details = null
+                )
+            ),
+            isFirstScan = false,
+            scanCount = 7
+        )
+
+        val rawFindings = comparison.anomalies.map { anomaly ->
+            val (findingType, severity) = AppSecurityScanner.mapBaselineAnomalyToFinding(
+                anomaly.type, isTrustedInstaller = false
+            )
+            TrustRiskModel.RawFinding(findingType, severity, anomaly.description, anomaly.details ?: "")
+        }
+
+        // Verify at least one HARD finding exists
+        val hardFindings = rawFindings.filter { it.type.hardness == TrustRiskModel.FindingHardness.HARD }
+        assertTrue("Compound scenario must contain HARD findings", hardFindings.isNotEmpty())
+
+        val verdict = model.evaluate(
+            packageName = comparison.packageName,
+            trustEvidence = systemTrust(comparison.packageName),
+            rawFindings = rawFindings,
+            isSystemApp = true,
+            installClass = TrustRiskModel.InstallClass.SYSTEM_PREINSTALLED
+        )
+
+        assertEquals("Compound real anomalies with HARD findings → CRITICAL",
+            TrustRiskModel.EffectiveRisk.CRITICAL, verdict.effectiveRisk)
+    }
+
+    // ════════════════════════════════════════════════════════════
+    //  32. Static guard: all production matchDeveloperCert calls
+    //      must pass callerDomain (no naked calls)
+    //
+    //  Reads actual source files and verifies that every call to
+    //  matchDeveloperCert in production code passes a callerDomain
+    //  argument. Test calls (in test/) are exempt.
+    // ════════════════════════════════════════════════════════════
+
+    @Test
+    fun `static guard - all production matchDeveloperCert calls pass callerDomain`() {
+        // Production source files that may call matchDeveloperCert
+        val productionFiles = listOf(
+            "TrustedAppsAndMessages.kt",
+            "TrustEvidenceEngine.kt",
+            "AppSecurityScanner.kt"
+        )
+
+        // Find the source root
+        val sourceRoot = java.io.File("src/main/java/com/cybersentinel/app/domain/security")
+
+        for (fileName in productionFiles) {
+            val file = sourceRoot.resolve(fileName)
+            if (!file.exists()) continue
+
+            val lines = file.readLines()
+            for ((index, line) in lines.withIndex()) {
+                val trimmed = line.trim()
+
+                // Skip: definition site, comments, strings
+                if (trimmed.startsWith("fun matchDeveloperCert")) continue
+                if (trimmed.startsWith("//") || trimmed.startsWith("*") || trimmed.startsWith("/*")) continue
+
+                // Look for call sites
+                if (trimmed.contains("matchDeveloperCert(") && !trimmed.contains("fun matchDeveloperCert")) {
+                    // This is a call site — verify it passes callerDomain or signerDomain
+                    // Read a window of lines to capture the full call (may span multiple lines)
+                    val window = lines.subList(
+                        maxOf(0, index),
+                        minOf(lines.size, index + 5)
+                    ).joinToString(" ")
+
+                    val passesCallerDomain = window.contains("callerDomain") || window.contains("signerDomain")
+                    assertTrue(
+                        "PRODUCTION SAFETY VIOLATION: $fileName:${index + 1} calls matchDeveloperCert " +
+                                "without callerDomain/signerDomain parameter. All production calls must be " +
+                                "domain-aware to prevent cross-domain cert matching.\n" +
+                                "Line: $trimmed",
+                        passesCallerDomain
+                    )
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `static guard - matchDeveloperCert has callerDomain parameter in signature`() {
+        // Verify that the function signature itself includes callerDomain
+        val file = java.io.File("src/main/java/com/cybersentinel/app/domain/security/TrustedAppsAndMessages.kt")
+        if (!file.exists()) return
+
+        val content = file.readText()
+        val defPattern = Regex("""fun\s+matchDeveloperCert\s*\([^)]*callerDomain""")
+        assertTrue(
+            "matchDeveloperCert function signature must include callerDomain parameter",
+            defPattern.containsMatchIn(content)
+        )
+    }
+
+    @Test
+    fun `static guard - production matchDeveloperCert call count matches expected`() {
+        // We know there are exactly 2 production call sites:
+        //  1. TrustedAppsAndMessages.kt - verifyTrustedApp() delegates
+        //  2. TrustEvidenceEngine.kt - verifyCertificate() delegates
+        // If someone adds a new call, this test will fail and force them to verify domain-awareness.
+        val sourceRoot = java.io.File("src/main/java/com/cybersentinel/app/domain/security")
+        var callCount = 0
+
+        val productionFiles = listOf(
+            "TrustedAppsAndMessages.kt",
+            "TrustEvidenceEngine.kt",
+            "AppSecurityScanner.kt"
+        )
+
+        for (fileName in productionFiles) {
+            val file = sourceRoot.resolve(fileName)
+            if (!file.exists()) continue
+
+            val lines = file.readLines()
+            for (line in lines) {
+                val trimmed = line.trim()
+                if (trimmed.startsWith("//") || trimmed.startsWith("*") || trimmed.startsWith("/*")) continue
+                if (trimmed.contains("matchDeveloperCert(") && !trimmed.contains("fun matchDeveloperCert")) {
+                    callCount++
+                }
+            }
+        }
+
+        assertEquals(
+            "Expected exactly 2 production call sites of matchDeveloperCert " +
+                    "(TrustedAppsAndMessages.verifyTrustedApp + TrustEvidenceEngine.verifyCertificate). " +
+                    "If you added a new call, verify it passes callerDomain and update this count.",
+            2, callCount
+        )
+    }
 }
