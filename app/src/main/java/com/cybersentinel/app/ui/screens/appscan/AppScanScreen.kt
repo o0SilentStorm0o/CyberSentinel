@@ -781,14 +781,17 @@ private fun SystemAppsSectionHeader(
     val safe = systemReports.count {
         it.verdict.effectiveRisk == TrustRiskModel.EffectiveRisk.SAFE
     }
-    val info = systemReports.count {
+    // Merge INFO + NEEDS_ATTENTION into one "Doporučení" bucket for system UX.
+    // Non-technical users can't act differently on INFO vs NEEDS_ATTENTION for
+    // system components (they can't uninstall them), so one metric is clearer.
+    val recommendations = systemReports.count {
+        it.verdict.effectiveRisk == TrustRiskModel.EffectiveRisk.NEEDS_ATTENTION ||
         it.verdict.effectiveRisk == TrustRiskModel.EffectiveRisk.INFO
     }
 
     val summaryParts = mutableListOf<String>()
     if (critical > 0) summaryParts.add("🔴 $critical anomálií")
-    if (needsAttention > 0) summaryParts.add("� $needsAttention doporučení")
-    if (info > 0) summaryParts.add("ℹ️ $info doporučení")
+    if (recommendations > 0) summaryParts.add("🟡 $recommendations doporučení")
     summaryParts.add("✅ $safe zkontrolováno")
     val summaryText = summaryParts.joinToString("  ·  ")
 

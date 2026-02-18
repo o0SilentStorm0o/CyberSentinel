@@ -488,22 +488,6 @@ class AppSecurityScanner @Inject constructor(
             }
 
             val (findingType, severity) = when (anomaly.type) {
-                BaselineManager.AnomalyType.CERT_CHANGED -> 
-                    TrustRiskModel.FindingType.BASELINE_SIGNATURE_CHANGE to RiskLevel.CRITICAL
-                BaselineManager.AnomalyType.NEW_SYSTEM_APP -> 
-                    TrustRiskModel.FindingType.BASELINE_NEW_SYSTEM_APP to RiskLevel.HIGH
-                BaselineManager.AnomalyType.INSTALLER_CHANGED -> 
-                    TrustRiskModel.FindingType.INSTALLER_ANOMALY to RiskLevel.MEDIUM
-                BaselineManager.AnomalyType.VERSION_CHANGED -> 
-                    TrustRiskModel.FindingType.OLD_TARGET_SDK to RiskLevel.LOW // Not really a finding
-                BaselineManager.AnomalyType.PARTITION_CHANGED -> 
-                    TrustRiskModel.FindingType.INSTALLER_ANOMALY to RiskLevel.MEDIUM
-                BaselineManager.AnomalyType.PERMISSION_SET_CHANGED ->
-                    TrustRiskModel.FindingType.OVER_PRIVILEGED to RiskLevel.LOW // Informational
-                BaselineManager.AnomalyType.HIGH_RISK_PERMISSION_ADDED ->
-                    TrustRiskModel.FindingType.HIGH_RISK_PERMISSION_ADDED to RiskLevel.HIGH
-                BaselineManager.AnomalyType.EXPORTED_SURFACE_INCREASED ->
-                    TrustRiskModel.FindingType.EXPORTED_SURFACE_INCREASED to RiskLevel.MEDIUM
                 BaselineManager.AnomalyType.VERSION_ROLLBACK -> {
                     // Context-aware: sideloaded rollback = HARD HIGH, Play Store rollback = SOFT MEDIUM
                     val isTrustedInstaller = trustEvidence.installerInfo.installerType in setOf(
@@ -513,12 +497,9 @@ class AppSecurityScanner @Inject constructor(
                         TrustEvidenceEngine.InstallerType.HUAWEI_APPGALLERY,
                         TrustEvidenceEngine.InstallerType.AMAZON_APPSTORE
                     )
-                    if (isTrustedInstaller) {
-                        TrustRiskModel.FindingType.VERSION_ROLLBACK_TRUSTED to RiskLevel.MEDIUM
-                    } else {
-                        TrustRiskModel.FindingType.VERSION_ROLLBACK to RiskLevel.HIGH
-                    }
+                    mapBaselineAnomalyToFinding(anomaly.type, isTrustedInstaller)
                 }
+                else -> mapBaselineAnomalyToFinding(anomaly.type)
             }
             
             // Only create issues for significant anomalies
@@ -1337,5 +1318,55 @@ class AppSecurityScanner @Inject constructor(
                 val deduction = (criticalRiskApps * 20) + (highRiskApps * 5)
                 return (100 - deduction).coerceIn(0, 100)
             }
+    }
+
+    // ══════════════════════════════════════════════════════════
+    //  Testable pipeline helpers (companion)
+    //
+    //  Extracted so unit tests can verify the scanner→model
+    //  mapping without Android framework dependencies.
+    // ══════════════════════════════════════════════════════════
+
+    companion object {
+
+        /**
+         * Pure mapping: BaselineAnomaly → (FindingType, RiskLevel).
+         *
+         * This is the canonical mapping used by scanApp() at line 490+.
+         * Tests can call this directly to prove the scanner pipeline
+         * produces the expected findings from baseline anomalies.
+         *
+         * @param anomalyType the type of baseline anomaly detected
+         * @param isTrustedInstaller whether the app was installed from a trusted source
+         * @return pair of (FindingType, RiskLevel) that will be fed to TrustRiskModel
+         */
+        fun mapBaselineAnomalyToFinding(
+            anomalyType: BaselineManager.AnomalyType,
+            isTrustedInstaller: Boolean = false
+        ): Pair<TrustRiskModel.FindingType, RiskLevel> = when (anomalyType) {
+            BaselineManager.AnomalyType.CERT_CHANGED ->
+                TrustRiskModel.FindingType.BASELINE_SIGNATURE_CHANGE to RiskLevel.CRITICAL
+            BaselineManager.AnomalyType.NEW_SYSTEM_APP ->
+                TrustRiskModel.FindingType.BASELINE_NEW_SYSTEM_APP to RiskLevel.HIGH
+            BaselineManager.AnomalyType.INSTALLER_CHANGED ->
+                TrustRiskModel.FindingType.INSTALLER_ANOMALY to RiskLevel.MEDIUM
+            BaselineManager.AnomalyType.VERSION_CHANGED ->
+                TrustRiskModel.FindingType.OLD_TARGET_SDK to RiskLevel.LOW
+            BaselineManager.AnomalyType.PARTITION_CHANGED ->
+                TrustRiskModel.FindingType.INSTALLER_ANOMALY to RiskLevel.MEDIUM
+            BaselineManager.AnomalyType.PERMISSION_SET_CHANGED ->
+                TrustRiskModel.FindingType.OVER_PRIVILEGED to RiskLevel.LOW
+            BaselineManager.AnomalyType.HIGH_RISK_PERMISSION_ADDED ->
+                TrustRiskModel.FindingType.HIGH_RISK_PERMISSION_ADDED to RiskLevel.HIGH
+            BaselineManager.AnomalyType.EXPORTED_SURFACE_INCREASED ->
+                TrustRiskModel.FindingType.EXPORTED_SURFACE_INCREASED to RiskLevel.MEDIUM
+            BaselineManager.AnomalyType.VERSION_ROLLBACK -> {
+                if (isTrustedInstaller) {
+                    TrustRiskModel.FindingType.VERSION_ROLLBACK_TRUSTED to RiskLevel.MEDIUM
+                } else {
+                    TrustRiskModel.FindingType.VERSION_ROLLBACK to RiskLevel.HIGH
+                }
+            }
+        }
     }
 }
