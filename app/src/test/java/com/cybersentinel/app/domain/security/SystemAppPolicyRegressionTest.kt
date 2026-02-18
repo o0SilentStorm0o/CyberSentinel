@@ -2302,12 +2302,15 @@ class SystemAppPolicyRegressionTest {
         assertTrue(
             "Expected at least 2 production call sites of matchDeveloperCert " +
                     "(verifyTrustedApp + verifyCertificate). Found $callCount. " +
-                    "If you added a new call site, ensure it passes callerDomain.",
+                    "If you added a new call site, it MUST pass callerDomain/signerDomain " +
+                    "and should be documented in TrustedAppsWhitelist.",
             callCount >= 2
         )
         assertTrue(
-            "Unexpectedly many production call sites ($callCount). If this is intentional, " +
-                    "verify all new calls pass callerDomain and raise this ceiling.",
+            "Unexpectedly many production call sites ($callCount). If this is intentional: " +
+                    "1) verify all new calls pass callerDomain/signerDomain, " +
+                    "2) document the new call in TrustedAppsWhitelist, " +
+                    "3) raise this ceiling. Do NOT just delete this test.",
             callCount <= 5
         )
     }
@@ -2435,14 +2438,17 @@ class SystemAppPolicyRegressionTest {
             TrustRiskModel.RawFinding(findingType, severity, anomaly.description, anomaly.details ?: "")
         }
 
-        // Use trust evidence for an updated system app
+        // Use trust evidence for an updated system app.
+        // Deliberately only set isUpdatedSystemApp + partition=DATA.
+        // Do NOT depend on isPlatformSigned value — test must be robust
+        // even if platformSigned heuristic changes in the future.
         val updatedSystemTrust = systemTrust("com.android.chrome").copy(
             systemAppInfo = TrustEvidenceEngine.SystemAppInfo(
                 isSystemApp = true,
                 isPrivilegedApp = false,
                 isUpdatedSystemApp = true,
                 partition = TrustEvidenceEngine.AppPartition.DATA,
-                isPlatformSigned = false
+                isPlatformSigned = systemTrust("com.android.chrome").systemAppInfo.isPlatformSigned
             )
         )
 
@@ -2457,6 +2463,153 @@ class SystemAppPolicyRegressionTest {
         assertEquals(
             "Updated system app with cert change must still be CRITICAL — " +
                     "partition bypass must NOT weaken baseline drift detection",
+            TrustRiskModel.EffectiveRisk.CRITICAL, verdict.effectiveRisk
+        )
+    }
+
+    // ════════════════════════════════════════════════════════════
+    //  35. Design lock: HARD findings must have severity >= HIGH
+    //      (with INSTALLER_ANOMALY as sole documented exception)
+    //
+    //  R1 fires on HARD + severity >= HIGH. If someone adds a new
+    //  HARD finding at MEDIUM severity, it silently bypasses R1.
+    //  This test prevents that "silent degradation" by locking
+    //  the design: every HARD finding MUST be fed to the model
+    //  at severity >= HIGH, except INSTALLER_ANOMALY which is
+    //  intentionally at MEDIUM (escalates through R4b only).
+    // ════════════════════════════════════════════════════════════
+
+    @Test
+    fun `design lock - all HARD findings have canonical severity at least HIGH except INSTALLER_ANOMALY`() {
+        // Map of HARD findings to their canonical scanner severity.
+        // Some come from mapBaselineAnomalyToFinding, others from scanner code paths.
+        // This is the "canonical" severity each HARD finding enters the model with.
+        val hardFindingCanonicalSeverity = mapOf(
+            TrustRiskModel.FindingType.DEBUG_SIGNATURE to AppSecurityScanner.RiskLevel.CRITICAL,
+            TrustRiskModel.FindingType.SIGNATURE_MISMATCH to AppSecurityScanner.RiskLevel.HIGH,
+            TrustRiskModel.FindingType.SIGNATURE_DRIFT to AppSecurityScanner.RiskLevel.HIGH,
+            TrustRiskModel.FindingType.BASELINE_SIGNATURE_CHANGE to AppSecurityScanner.RiskLevel.CRITICAL,
+            TrustRiskModel.FindingType.BASELINE_NEW_SYSTEM_APP to AppSecurityScanner.RiskLevel.HIGH,
+            TrustRiskModel.FindingType.INTEGRITY_FAIL_WITH_HOOKING to AppSecurityScanner.RiskLevel.CRITICAL,
+            TrustRiskModel.FindingType.VERSION_ROLLBACK to AppSecurityScanner.RiskLevel.HIGH,
+            TrustRiskModel.FindingType.PARTITION_ANOMALY to AppSecurityScanner.RiskLevel.HIGH,
+            TrustRiskModel.FindingType.HIGH_RISK_PERMISSION_ADDED to AppSecurityScanner.RiskLevel.HIGH,
+            // INSTALLER_ANOMALY is the sole exception: HARD but MEDIUM severity
+            TrustRiskModel.FindingType.INSTALLER_ANOMALY to AppSecurityScanner.RiskLevel.MEDIUM
+        )
+
+        // First: verify we've covered ALL HARD finding types
+        val allHardTypes = TrustRiskModel.FindingType.entries
+            .filter { it.hardness == TrustRiskModel.FindingHardness.HARD }
+            .toSet()
+        assertEquals(
+            "hardFindingCanonicalSeverity must cover every HARD FindingType. " +
+                    "If you added a new HARD finding, add it to this map with its canonical severity.",
+            allHardTypes, hardFindingCanonicalSeverity.keys
+        )
+
+        // Second: assert severity >= HIGH for all except INSTALLER_ANOMALY
+        for ((findingType, severity) in hardFindingCanonicalSeverity) {
+            if (findingType == TrustRiskModel.FindingType.INSTALLER_ANOMALY) {
+                assertEquals(
+                    "INSTALLER_ANOMALY is the documented exception: HARD but MEDIUM. " +
+                            "It escalates through R4b (installer + high-risk cluster), not R1.",
+                    AppSecurityScanner.RiskLevel.MEDIUM, severity
+                )
+            } else {
+                assertTrue(
+                    "HARD finding ${findingType.name} has canonical severity ${severity.name} " +
+                            "which is below HIGH. This means it silently bypasses R1 and will " +
+                            "NOT produce CRITICAL. Either raise its severity or add it as a " +
+                            "documented exception with a comment explaining why.",
+                    severity.score >= AppSecurityScanner.RiskLevel.HIGH.score
+                )
+            }
+        }
+    }
+
+    // ════════════════════════════════════════════════════════════
+    //  36. R4b escalation contract: INSTALLER_ANOMALY's only path
+    //      to NEEDS_ATTENTION is through high-risk cluster combo
+    //
+    //  Proves that INSTALLER_ANOMALY at MEDIUM severity:
+    //    - alone → NOT CRITICAL, NOT NEEDS_ATTENTION
+    //    - with high-risk cluster (ACCESSIBILITY) → NEEDS_ATTENTION
+    //    - with non-dangerous cluster (CAMERA) → NOT NEEDS_ATTENTION
+    //  This locks the R4b escalation path so no one can silently
+    //  remove it without the contract test catching it.
+    // ════════════════════════════════════════════════════════════
+
+    @Test
+    fun `R4b contract - INSTALLER_ANOMALY alone at MEDIUM does not reach NEEDS_ATTENTION`() {
+        val verdict = model.evaluate(
+            packageName = "com.example.installer.alone",
+            trustEvidence = userTrust("com.example.installer.alone", score = 40,
+                level = TrustEvidenceEngine.TrustLevel.LOW),
+            rawFindings = listOf(
+                finding(TrustRiskModel.FindingType.INSTALLER_ANOMALY, AppSecurityScanner.RiskLevel.MEDIUM)
+            ),
+            isSystemApp = false,
+            installClass = TrustRiskModel.InstallClass.USER_INSTALLED,
+            grantedPermissions = emptyList(),
+            appCategory = AppCategoryDetector.AppCategory.OTHER
+        )
+        assertNotEquals(
+            "INSTALLER_ANOMALY alone at MEDIUM must NOT reach CRITICAL",
+            TrustRiskModel.EffectiveRisk.CRITICAL, verdict.effectiveRisk
+        )
+        assertNotEquals(
+            "INSTALLER_ANOMALY alone at MEDIUM must NOT reach NEEDS_ATTENTION — " +
+                    "needs high-risk cluster combo via R4b",
+            TrustRiskModel.EffectiveRisk.NEEDS_ATTENTION, verdict.effectiveRisk
+        )
+    }
+
+    @Test
+    fun `R4b contract - INSTALLER_ANOMALY with ACCESSIBILITY cluster reaches NEEDS_ATTENTION`() {
+        val verdict = model.evaluate(
+            packageName = "com.example.installer.accessibility",
+            trustEvidence = userTrust("com.example.installer.accessibility", score = 40,
+                level = TrustEvidenceEngine.TrustLevel.LOW),
+            rawFindings = listOf(
+                finding(TrustRiskModel.FindingType.INSTALLER_ANOMALY, AppSecurityScanner.RiskLevel.MEDIUM)
+            ),
+            isSystemApp = false,
+            installClass = TrustRiskModel.InstallClass.USER_INSTALLED,
+            grantedPermissions = listOf("android.permission.BIND_ACCESSIBILITY_SERVICE"),
+            appCategory = AppCategoryDetector.AppCategory.OTHER
+        )
+        assertTrue(
+            "INSTALLER_ANOMALY + ACCESSIBILITY cluster must reach at least NEEDS_ATTENTION via R4b. " +
+                    "Got: ${verdict.effectiveRisk}",
+            verdict.effectiveRisk == TrustRiskModel.EffectiveRisk.NEEDS_ATTENTION ||
+                    verdict.effectiveRisk == TrustRiskModel.EffectiveRisk.CRITICAL
+        )
+    }
+
+    @Test
+    fun `R4b contract - INSTALLER_ANOMALY with non-dangerous cluster (CAMERA) does NOT reach NEEDS_ATTENTION via R4b`() {
+        // CAMERA is a privacy cluster, not a high-risk cluster.
+        // R4b only fires for ACCESSIBILITY, NOTIFICATION_LISTENER, VPN, INSTALL_PACKAGES, DEVICE_ADMIN.
+        val verdict = model.evaluate(
+            packageName = "com.example.installer.camera",
+            trustEvidence = userTrust("com.example.installer.camera", score = 55,
+                level = TrustEvidenceEngine.TrustLevel.MODERATE),
+            rawFindings = listOf(
+                finding(TrustRiskModel.FindingType.INSTALLER_ANOMALY, AppSecurityScanner.RiskLevel.MEDIUM)
+            ),
+            isSystemApp = false,
+            installClass = TrustRiskModel.InstallClass.USER_INSTALLED,
+            grantedPermissions = listOf("android.permission.CAMERA"),
+            appCategory = AppCategoryDetector.AppCategory.OTHER
+        )
+        assertNotEquals(
+            "INSTALLER_ANOMALY + CAMERA (privacy cluster) must NOT reach NEEDS_ATTENTION via R4b — " +
+                    "R4b only fires for dangerous high-risk clusters",
+            TrustRiskModel.EffectiveRisk.NEEDS_ATTENTION, verdict.effectiveRisk
+        )
+        assertNotEquals(
+            "INSTALLER_ANOMALY + CAMERA must NOT reach CRITICAL",
             TrustRiskModel.EffectiveRisk.CRITICAL, verdict.effectiveRisk
         )
     }

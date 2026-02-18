@@ -125,7 +125,7 @@ Structured knowledge base output transforming the scanner from "result producer"
 - **Networking:** Retrofit + Moshi
 - **Camera:** CameraX + ML Kit (barcode scanning)
 - **Background:** WorkManager
-- **Testing:** JUnit 4 (899 tests, 0 failures)
+- **Testing:** JUnit 4 (903 tests, 0 failures)
 
 ## Project Structure
 
@@ -163,7 +163,7 @@ app/src/main/java/com/cybersentinel/app/
 ./gradlew testDebugUnitTest
 ```
 
-**899 tests** across 10+ test classes covering:
+**903 tests** across 10+ test classes covering:
 - TrustRiskModel (91 tests) — verdict logic, combo gating, trust tiers, category whitelist
 - AppCategoryDetector (29 tests) — category classification accuracy
 - BaselineManager (18 tests) — change detection, anomaly types
