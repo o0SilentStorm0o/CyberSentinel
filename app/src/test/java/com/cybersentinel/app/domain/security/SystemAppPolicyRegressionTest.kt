@@ -2220,21 +2220,25 @@ class SystemAppPolicyRegressionTest {
             val file = sourceRoot.resolve(fileName)
             if (!file.exists()) continue
 
-            val lines = file.readLines()
+            val content = file.readText()
+            // Strip block comments (/* ... */) to avoid false matches in docs
+            val stripped = content.replace(Regex("""/\*.*?\*/""", RegexOption.DOT_MATCHES_ALL), "")
+            val lines = stripped.lines()
+
             for ((index, line) in lines.withIndex()) {
                 val trimmed = line.trim()
 
-                // Skip: definition site, comments, strings
+                // Skip: definition site, single-line comments, string literals
                 if (trimmed.startsWith("fun matchDeveloperCert")) continue
-                if (trimmed.startsWith("//") || trimmed.startsWith("*") || trimmed.startsWith("/*")) continue
+                if (trimmed.startsWith("//")) continue
 
                 // Look for call sites
                 if (trimmed.contains("matchDeveloperCert(") && !trimmed.contains("fun matchDeveloperCert")) {
-                    // This is a call site — verify it passes callerDomain or signerDomain
-                    // Read a window of lines to capture the full call (may span multiple lines)
+                    // Read a window of lines to capture the full call (may span multiple lines
+                    // due to named args on separate lines)
                     val window = lines.subList(
                         maxOf(0, index),
-                        minOf(lines.size, index + 5)
+                        minOf(lines.size, index + 8)  // 8 lines to handle multiline calls
                     ).joinToString(" ")
 
                     val passesCallerDomain = window.contains("callerDomain") || window.contains("signerDomain")
@@ -2265,11 +2269,10 @@ class SystemAppPolicyRegressionTest {
     }
 
     @Test
-    fun `static guard - production matchDeveloperCert call count matches expected`() {
-        // We know there are exactly 2 production call sites:
-        //  1. TrustedAppsAndMessages.kt - verifyTrustedApp() delegates
-        //  2. TrustEvidenceEngine.kt - verifyCertificate() delegates
-        // If someone adds a new call, this test will fail and force them to verify domain-awareness.
+    fun `static guard - production matchDeveloperCert call count is sane and all are domain-aware`() {
+        // Sanity: at least 2 production call sites exist (verifyTrustedApp + verifyCertificate).
+        // We don't hard-lock the count to avoid CI noise from legitimate new flows.
+        // Instead, every call site found is verified for domain-awareness above.
         val sourceRoot = java.io.File("src/main/java/com/cybersentinel/app/domain/security")
         var callCount = 0
 
@@ -2283,21 +2286,178 @@ class SystemAppPolicyRegressionTest {
             val file = sourceRoot.resolve(fileName)
             if (!file.exists()) continue
 
-            val lines = file.readLines()
-            for (line in lines) {
+            val content = file.readText()
+            // Strip block comments to avoid false matches in documentation
+            val stripped = content.replace(Regex("""/\*.*?\*/""", RegexOption.DOT_MATCHES_ALL), "")
+
+            for (line in stripped.lines()) {
                 val trimmed = line.trim()
-                if (trimmed.startsWith("//") || trimmed.startsWith("*") || trimmed.startsWith("/*")) continue
+                if (trimmed.startsWith("//")) continue
                 if (trimmed.contains("matchDeveloperCert(") && !trimmed.contains("fun matchDeveloperCert")) {
                     callCount++
                 }
             }
         }
 
+        assertTrue(
+            "Expected at least 2 production call sites of matchDeveloperCert " +
+                    "(verifyTrustedApp + verifyCertificate). Found $callCount. " +
+                    "If you added a new call site, ensure it passes callerDomain.",
+            callCount >= 2
+        )
+        assertTrue(
+            "Unexpectedly many production call sites ($callCount). If this is intentional, " +
+                    "verify all new calls pass callerDomain and raise this ceiling.",
+            callCount <= 5
+        )
+    }
+
+    // ════════════════════════════════════════════════════════════
+    //  33. R1 threshold contract: INSTALLER_ANOMALY alone at MEDIUM
+    //      does NOT trigger CRITICAL
+    //
+    //  INSTALLER_ANOMALY is HARD (never suppressed) but at MEDIUM
+    //  severity it does not meet R1's >= HIGH threshold.
+    //  It escalates only through R4b (installer + high-risk cluster)
+    //  or through the weighted R10 threshold.
+    // ════════════════════════════════════════════════════════════
+
+    @Test
+    fun `R1 threshold - INSTALLER_ANOMALY alone at MEDIUM does not produce CRITICAL`() {
+        // This is the real scanner mapping: INSTALLER_CHANGED → MEDIUM severity
+        val (findingType, severity) = AppSecurityScanner.mapBaselineAnomalyToFinding(
+            BaselineManager.AnomalyType.INSTALLER_CHANGED
+        )
+        assertEquals("Sanity: MEDIUM severity from scanner", AppSecurityScanner.RiskLevel.MEDIUM, severity)
+        assertEquals("Sanity: HARD hardness", TrustRiskModel.FindingHardness.HARD, findingType.hardness)
+
+        val verdict = model.evaluate(
+            packageName = "com.android.providers.media",
+            trustEvidence = systemTrust("com.android.providers.media"),
+            rawFindings = listOf(TrustRiskModel.RawFinding(findingType, severity, "installer changed", "")),
+            isSystemApp = true,
+            installClass = TrustRiskModel.InstallClass.SYSTEM_PREINSTALLED
+        )
+        assertNotEquals(
+            "INSTALLER_ANOMALY at MEDIUM must NOT produce CRITICAL — benign installer " +
+                    "migrations (MDM, OEM store switch) should not alarm",
+            TrustRiskModel.EffectiveRisk.CRITICAL, verdict.effectiveRisk
+        )
+    }
+
+    @Test
+    fun `R1 threshold - INSTALLER_ANOMALY at HIGH still produces CRITICAL (elevated severity path)`() {
+        // If some future code path elevates INSTALLER_ANOMALY to HIGH, R1 should fire
+        val verdict = model.evaluate(
+            packageName = "com.example.escalated",
+            trustEvidence = userTrust("com.example.escalated"),
+            rawFindings = listOf(
+                finding(TrustRiskModel.FindingType.INSTALLER_ANOMALY, AppSecurityScanner.RiskLevel.HIGH)
+            ),
+            isSystemApp = false,
+            installClass = TrustRiskModel.InstallClass.USER_INSTALLED
+        )
         assertEquals(
-            "Expected exactly 2 production call sites of matchDeveloperCert " +
-                    "(TrustedAppsAndMessages.verifyTrustedApp + TrustEvidenceEngine.verifyCertificate). " +
-                    "If you added a new call, verify it passes callerDomain and update this count.",
-            2, callCount
+            "INSTALLER_ANOMALY at HIGH severity must still produce CRITICAL via R1",
+            TrustRiskModel.EffectiveRisk.CRITICAL, verdict.effectiveRisk
+        )
+    }
+
+    @Test
+    fun `R1 threshold - all other HARD findings at their scanner severity still produce CRITICAL`() {
+        // Prove that the R1 threshold change does not weaken any other HARD finding.
+        // Every HARD finding except INSTALLER_ANOMALY is mapped at severity >= HIGH.
+        val hardFindingsAboveMedium = mapOf(
+            TrustRiskModel.FindingType.BASELINE_SIGNATURE_CHANGE to AppSecurityScanner.RiskLevel.CRITICAL,
+            TrustRiskModel.FindingType.BASELINE_NEW_SYSTEM_APP to AppSecurityScanner.RiskLevel.HIGH,
+            TrustRiskModel.FindingType.VERSION_ROLLBACK to AppSecurityScanner.RiskLevel.HIGH,
+            TrustRiskModel.FindingType.HIGH_RISK_PERMISSION_ADDED to AppSecurityScanner.RiskLevel.HIGH,
+            TrustRiskModel.FindingType.PARTITION_ANOMALY to AppSecurityScanner.RiskLevel.HIGH
+        )
+
+        for ((findingType, severity) in hardFindingsAboveMedium) {
+            assertEquals("${findingType.name} must be HARD",
+                TrustRiskModel.FindingHardness.HARD, findingType.hardness)
+
+            val verdict = model.evaluate(
+                packageName = "com.android.test.r1threshold",
+                trustEvidence = systemTrust("com.android.test.r1threshold"),
+                rawFindings = listOf(TrustRiskModel.RawFinding(findingType, severity, findingType.name, "")),
+                isSystemApp = true,
+                installClass = TrustRiskModel.InstallClass.SYSTEM_PREINSTALLED
+            )
+            assertEquals(
+                "${findingType.name} at ${severity.name} must still produce CRITICAL via R1",
+                TrustRiskModel.EffectiveRisk.CRITICAL, verdict.effectiveRisk
+            )
+        }
+    }
+
+    // ════════════════════════════════════════════════════════════
+    //  34. Updated system app cert drift: partition bypass does
+    //      NOT weaken baseline drift detection
+    //
+    //  A FLAG_UPDATED_SYSTEM_APP in /data/app gets partition
+    //  anomaly suppressed (legitimate), but cert change via
+    //  baseline must still fire CRITICAL.
+    // ════════════════════════════════════════════════════════════
+
+    @Test
+    fun `updated system app - cert change still CRITICAL even though partition anomaly is bypassed`() {
+        // Step 1: Partition anomaly must NOT fire for updated system app
+        val partitionAnomaly = TrustedAppsWhitelist.detectPartitionAnomaly(
+            packageName = "com.android.chrome",
+            isSystemApp = true,
+            sourceDir = "/data/app/~~update/com.android.chrome-1/base.apk",
+            partition = TrustEvidenceEngine.AppPartition.DATA,
+            isUpdatedSystemApp = true  // Legitimate Play Store update
+        )
+        assertNull("Updated system app must NOT trigger partition anomaly", partitionAnomaly)
+
+        // Step 2: But cert change in baseline must still fire CRITICAL
+        val comparison = BaselineManager.BaselineComparison(
+            packageName = "com.android.chrome",
+            status = BaselineManager.BaselineStatus.CHANGED,
+            anomalies = listOf(
+                BaselineManager.BaselineAnomaly(
+                    type = BaselineManager.AnomalyType.CERT_CHANGED,
+                    severity = BaselineManager.AnomalySeverity.CRITICAL,
+                    description = "Podpisový certifikát se změnil!",
+                    details = "Chrome cert rotated unexpectedly"
+                )
+            ),
+            isFirstScan = false,
+            scanCount = 5
+        )
+
+        val rawFindings = comparison.anomalies.map { anomaly ->
+            val (findingType, severity) = AppSecurityScanner.mapBaselineAnomalyToFinding(anomaly.type)
+            TrustRiskModel.RawFinding(findingType, severity, anomaly.description, anomaly.details ?: "")
+        }
+
+        // Use trust evidence for an updated system app
+        val updatedSystemTrust = systemTrust("com.android.chrome").copy(
+            systemAppInfo = TrustEvidenceEngine.SystemAppInfo(
+                isSystemApp = true,
+                isPrivilegedApp = false,
+                isUpdatedSystemApp = true,
+                partition = TrustEvidenceEngine.AppPartition.DATA,
+                isPlatformSigned = false
+            )
+        )
+
+        val verdict = model.evaluate(
+            packageName = "com.android.chrome",
+            trustEvidence = updatedSystemTrust,
+            rawFindings = rawFindings,
+            isSystemApp = true,
+            installClass = TrustRiskModel.InstallClass.SYSTEM_PREINSTALLED
+        )
+
+        assertEquals(
+            "Updated system app with cert change must still be CRITICAL — " +
+                    "partition bypass must NOT weaken baseline drift detection",
+            TrustRiskModel.EffectiveRisk.CRITICAL, verdict.effectiveRisk
         )
     }
 }

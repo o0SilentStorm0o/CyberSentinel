@@ -47,8 +47,11 @@ Persists per-app state (cert, version, installer, permissions, exported surface)
 - **Subsequent scans** detect drift: cert rotation, version rollback, installer switch, new high-risk permissions
 - First-scan security gap is covered by identity axis (cert whitelist, signer domain) and capability axis (partition anomaly, privilege analysis)
 - Anomalies are mapped through `AppSecurityScanner.mapBaselineAnomalyToFinding()` to the 3-axis model
-- HARD anomalies (cert change, version rollback, installer switch) → always CRITICAL, never suppressed
+- HARD anomalies (cert change, version rollback, new system app) → always CRITICAL, never suppressed
 - SOFT anomalies (version update, permission set change) → suppressed for system apps (hygiene rules)
+- INSTALLER_ANOMALY: HARD but at MEDIUM severity — does not alone trigger CRITICAL (benign migrations exist); escalates only through combination rules (R4b)
+
+> **Source of truth:** see KDoc on `BaselineManager.compareWithBaseline()` for full initialization semantics and first-scan coverage model.
 
 ### Incident Pipeline
 Standardized 3-level evidence model:
@@ -122,7 +125,7 @@ Structured knowledge base output transforming the scanner from "result producer"
 - **Networking:** Retrofit + Moshi
 - **Camera:** CameraX + ML Kit (barcode scanning)
 - **Background:** WorkManager
-- **Testing:** JUnit 4 (895 tests, 0 failures)
+- **Testing:** JUnit 4 (899 tests, 0 failures)
 
 ## Project Structure
 
@@ -160,7 +163,7 @@ app/src/main/java/com/cybersentinel/app/
 ./gradlew testDebugUnitTest
 ```
 
-**895 tests** across 10+ test classes covering:
+**899 tests** across 10+ test classes covering:
 - TrustRiskModel (91 tests) — verdict logic, combo gating, trust tiers, category whitelist
 - AppCategoryDetector (29 tests) — category classification accuracy
 - BaselineManager (18 tests) — change detection, anomaly types

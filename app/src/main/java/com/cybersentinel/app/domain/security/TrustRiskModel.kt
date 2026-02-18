@@ -573,9 +573,18 @@ class TrustRiskModel @Inject constructor() {
         // ══════════════════════════════════════════════════════
 
         // Step 1: Hard findings — ALWAYS CRITICAL (trust/category/policy NEVER overrides)
+        //
+        // Threshold: HARD + severity >= HIGH.
+        // This ensures that INSTALLER_ANOMALY (HARD, MEDIUM) does not alone trigger
+        // CRITICAL — installer chain changes can be benign (MDM migration, OEM store
+        // switch). INSTALLER_ANOMALY is still HARD (never suppressed by hygiene) and
+        // participates in R4b (installer + dangerous cluster → NEEDS_ATTENTION).
+        //
+        // All other HARD findings (cert, rollback, partition, debug, hooking) are
+        // severity >= HIGH and still trigger R1 unconditionally.
         val hasHardFindings = adjustedFindings.any {
             it.hardness == FindingHardness.HARD &&
-            it.adjustedSeverity.score >= AppSecurityScanner.RiskLevel.MEDIUM.score
+            it.adjustedSeverity.score >= AppSecurityScanner.RiskLevel.HIGH.score
         }
 
         // Step 2: Anomalous trust — ALWAYS CRITICAL

@@ -153,6 +153,8 @@ class BaselineManager @Inject constructor(
      *   Together these ensure that even on the very first scan, a compromised
      *   system component would be flagged by cert mismatch or partition anomaly
      *   rather than relying on baseline drift detection.
+     *
+     * @see README.md "App Baseline Engine" section for high-level overview
      */
     suspend fun compareWithBaseline(
         packageName: String,
