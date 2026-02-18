@@ -934,6 +934,50 @@ class TrustRiskModel @Inject constructor() {
     ): Pair<String, String> {
         val prefix = if (isSystem) "Systémová komponenta" else "Aplikace"
 
+        // System apps use a dedicated 3-tier scale:
+        //   Zkontrolováno / Doporučení / Anomálie integrity
+        if (isSystem) {
+            return when (risk) {
+                EffectiveRisk.CRITICAL -> {
+                    val detail = when {
+                        findings.any { it.findingType == FindingType.BASELINE_SIGNATURE_CHANGE } ->
+                            "$prefix má změněný podpis od posledního skenování"
+                        findings.any { it.findingType == FindingType.SIGNATURE_DRIFT } ->
+                            "$prefix má odlišný podpis od očekávaného"
+                        findings.any { it.findingType == FindingType.PARTITION_ANOMALY } ->
+                            "$prefix je umístěna v neočekávaném oddílu"
+                        findings.any { it.findingType == FindingType.INTEGRITY_FAIL_WITH_HOOKING } ->
+                            "$prefix vykazuje známky manipulace"
+                        findings.any { it.findingType == FindingType.DEBUG_SIGNATURE } ->
+                            "$prefix je podepsána ladicím klíčem"
+                        findings.any { it.findingType == FindingType.VERSION_ROLLBACK } ->
+                            "$prefix byla degradována na starší verzi"
+                        findings.any { it.hardness == FindingHardness.HARD } ->
+                            "$prefix vykazuje neobvyklé bezpečnostní chování"
+                        else ->
+                            "$prefix má podezřelé chování při nízké úrovni důvěry"
+                    }
+                    "Anomálie integrity" to detail
+                }
+                EffectiveRisk.NEEDS_ATTENTION -> {
+                    val detail = when {
+                        findings.any { it.findingType == FindingType.HIGH_RISK_PERMISSION_ADDED } ->
+                            "$prefix získala nová riziková oprávnění od posledního skenování"
+                        else ->
+                            "$prefix má nálezy, které stojí za kontrolu"
+                    }
+                    "Doporučení" to detail
+                }
+                EffectiveRisk.INFO -> {
+                    "Doporučení" to "$prefix má přístup k některým funkcím zařízení"
+                }
+                EffectiveRisk.SAFE -> {
+                    "Zkontrolováno" to "$prefix splňuje bezpečnostní standardy"
+                }
+            }
+        }
+
+        // User apps: standard 4-tier scale
         return when (risk) {
             EffectiveRisk.CRITICAL -> {
                 val comboNames = combos

@@ -1329,4 +1329,255 @@ class SystemAppPolicyRegressionTest {
         }
         assertEquals("All former R1 apps should be SAFE without PARTITION_ANOMALY", r1Packages.size, safeCount)
     }
+
+    // ════════════════════════════════════════════════════════════
+    //  24. NEGATIVE TESTS — prove CRITICAL still fires for genuine anomalies
+    //
+    //  These tests guarantee that "CRITICAL=0 in normal state" does not
+    //  mean "CRITICAL=0 always".  Each test synthesizes a realistic
+    //  compromise scenario for a system app and verifies CRITICAL fires.
+    // ════════════════════════════════════════════════════════════
+
+    @Test
+    fun `NEGATIVE - SIGNATURE_DRIFT on system app = CRITICAL`() {
+        // Scenario: baseline recorded cert X, now the app has cert Y.
+        // This is the #1 indicator of a tampered/repackaged system component.
+        val verdict = model.evaluate(
+            packageName = "com.android.systemui",
+            trustEvidence = systemTrust("com.android.systemui"),
+            rawFindings = listOf(
+                finding(TrustRiskModel.FindingType.SIGNATURE_DRIFT, AppSecurityScanner.RiskLevel.CRITICAL)
+            ),
+            isSystemApp = true,
+            installClass = TrustRiskModel.InstallClass.SYSTEM_PREINSTALLED
+        )
+        assertEquals(
+            "SIGNATURE_DRIFT must produce CRITICAL even for system apps",
+            TrustRiskModel.EffectiveRisk.CRITICAL,
+            verdict.effectiveRisk
+        )
+        // Verify it's R1 (hard finding), not R2 (trust)
+        assertTrue(
+            "Verdict must have a HARD finding",
+            verdict.adjustedFindings.any {
+                it.hardness == TrustRiskModel.FindingHardness.HARD &&
+                it.adjustedSeverity.score >= AppSecurityScanner.RiskLevel.MEDIUM.score
+            }
+        )
+    }
+
+    @Test
+    fun `NEGATIVE - BASELINE_SIGNATURE_CHANGE on system app = CRITICAL`() {
+        // Scenario: Play-updated system app's signing cert changed vs baseline.
+        // Even though FLAG_UPDATED_SYSTEM_APP is set, cert change is a red flag.
+        val verdict = model.evaluate(
+            packageName = "com.android.chrome",
+            trustEvidence = systemTrust("com.android.chrome"),
+            rawFindings = listOf(
+                finding(TrustRiskModel.FindingType.BASELINE_SIGNATURE_CHANGE, AppSecurityScanner.RiskLevel.CRITICAL)
+            ),
+            isSystemApp = true,
+            installClass = TrustRiskModel.InstallClass.SYSTEM_PREINSTALLED
+        )
+        assertEquals(
+            "BASELINE_SIGNATURE_CHANGE must produce CRITICAL",
+            TrustRiskModel.EffectiveRisk.CRITICAL,
+            verdict.effectiveRisk
+        )
+    }
+
+    @Test
+    fun `NEGATIVE - system app in data_app WITHOUT updated flag = CRITICAL via PARTITION_ANOMALY`() {
+        // Scenario: attacker overlaid a system app from /data/app but the
+        // FLAG_UPDATED_SYSTEM_APP is not set → suspicious overlay.
+        // Step 1: detectPartitionAnomaly fires (tested in section 22)
+        val anomaly = TrustedAppsWhitelist.detectPartitionAnomaly(
+            packageName = "com.android.phone",
+            isSystemApp = true,
+            sourceDir = "/data/app/~~fake/com.android.phone-123/base.apk",
+            partition = TrustEvidenceEngine.AppPartition.DATA,
+            isUpdatedSystemApp = false  // NOT a legitimate update
+        )
+        assertNotNull("Partition anomaly must fire for non-updated system app in /data/app", anomaly)
+
+        // Step 2: that anomaly produces a HARD finding → CRITICAL
+        val verdict = model.evaluate(
+            packageName = "com.android.phone",
+            trustEvidence = systemTrust("com.android.phone"),
+            rawFindings = listOf(
+                finding(TrustRiskModel.FindingType.PARTITION_ANOMALY, AppSecurityScanner.RiskLevel.HIGH)
+            ),
+            isSystemApp = true,
+            installClass = TrustRiskModel.InstallClass.SYSTEM_PREINSTALLED
+        )
+        assertEquals(
+            "Non-updated system app with PARTITION_ANOMALY must be CRITICAL",
+            TrustRiskModel.EffectiveRisk.CRITICAL,
+            verdict.effectiveRisk
+        )
+    }
+
+    @Test
+    fun `NEGATIVE - PLATFORM_SIGNED false for system partition = ANOMALOUS trust`() {
+        // Scenario: a system app on /system claims FLAG_SYSTEM but is NOT
+        // signed with the platform key → potential ROM modification.
+        // On a rooted device this triggers TrustLevel.ANOMALOUS (line 271 in TrustEvidenceEngine).
+        val anomalousTrust = systemTrust(
+            packageName = "com.android.settings",
+            level = TrustEvidenceEngine.TrustLevel.ANOMALOUS,
+            score = 10
+        )
+        val verdict = model.evaluate(
+            packageName = "com.android.settings",
+            trustEvidence = anomalousTrust,
+            rawFindings = emptyList(),
+            isSystemApp = true,
+            installClass = TrustRiskModel.InstallClass.SYSTEM_PREINSTALLED
+        )
+        assertEquals(
+            "ANOMALOUS trust (non-platform-signed system app) must be CRITICAL via R2",
+            TrustRiskModel.EffectiveRisk.CRITICAL,
+            verdict.effectiveRisk
+        )
+    }
+
+    @Test
+    fun `NEGATIVE - VERSION_ROLLBACK on system app = CRITICAL`() {
+        // Scenario: system app was downgraded (common in downgrade attacks).
+        val verdict = model.evaluate(
+            packageName = "com.android.phone",
+            trustEvidence = systemTrust("com.android.phone"),
+            rawFindings = listOf(
+                finding(TrustRiskModel.FindingType.VERSION_ROLLBACK, AppSecurityScanner.RiskLevel.HIGH)
+            ),
+            isSystemApp = true,
+            installClass = TrustRiskModel.InstallClass.SYSTEM_PREINSTALLED
+        )
+        assertEquals(
+            "VERSION_ROLLBACK must produce CRITICAL for system apps",
+            TrustRiskModel.EffectiveRisk.CRITICAL,
+            verdict.effectiveRisk
+        )
+    }
+
+    @Test
+    fun `NEGATIVE - DEBUG_SIGNATURE on system app = CRITICAL`() {
+        // Scenario: system app signed with debug key → definitely tampered ROM.
+        val verdict = model.evaluate(
+            packageName = "com.android.phone",
+            trustEvidence = systemTrust("com.android.phone"),
+            rawFindings = listOf(
+                finding(TrustRiskModel.FindingType.DEBUG_SIGNATURE, AppSecurityScanner.RiskLevel.HIGH)
+            ),
+            isSystemApp = true,
+            installClass = TrustRiskModel.InstallClass.SYSTEM_PREINSTALLED
+        )
+        assertEquals(
+            "DEBUG_SIGNATURE must produce CRITICAL for system apps",
+            TrustRiskModel.EffectiveRisk.CRITICAL,
+            verdict.effectiveRisk
+        )
+    }
+
+    @Test
+    fun `NEGATIVE - INTEGRITY_FAIL_WITH_HOOKING on system app = CRITICAL`() {
+        // Scenario: hooking framework (Xposed/Frida) detected on system component.
+        val verdict = model.evaluate(
+            packageName = "com.android.systemui",
+            trustEvidence = systemTrust("com.android.systemui"),
+            rawFindings = listOf(
+                finding(TrustRiskModel.FindingType.INTEGRITY_FAIL_WITH_HOOKING, AppSecurityScanner.RiskLevel.CRITICAL)
+            ),
+            isSystemApp = true,
+            installClass = TrustRiskModel.InstallClass.SYSTEM_PREINSTALLED
+        )
+        assertEquals(
+            "INTEGRITY_FAIL_WITH_HOOKING must produce CRITICAL for system apps",
+            TrustRiskModel.EffectiveRisk.CRITICAL,
+            verdict.effectiveRisk
+        )
+    }
+
+    @Test
+    fun `NEGATIVE - multiple HARD findings compound on system app`() {
+        // Scenario: cert changed + version rolled back + partition anomaly = definitely compromised
+        val verdict = model.evaluate(
+            packageName = "com.android.phone",
+            trustEvidence = systemTrust("com.android.phone"),
+            rawFindings = listOf(
+                finding(TrustRiskModel.FindingType.BASELINE_SIGNATURE_CHANGE, AppSecurityScanner.RiskLevel.CRITICAL),
+                finding(TrustRiskModel.FindingType.VERSION_ROLLBACK, AppSecurityScanner.RiskLevel.HIGH),
+                finding(TrustRiskModel.FindingType.PARTITION_ANOMALY, AppSecurityScanner.RiskLevel.HIGH)
+            ),
+            isSystemApp = true,
+            installClass = TrustRiskModel.InstallClass.SYSTEM_PREINSTALLED
+        )
+        assertEquals(
+            "Multiple HARD findings must produce CRITICAL",
+            TrustRiskModel.EffectiveRisk.CRITICAL,
+            verdict.effectiveRisk
+        )
+        assertTrue(
+            "Multiple HARD findings must be preserved in adjusted findings",
+            verdict.adjustedFindings.count {
+                it.hardness == TrustRiskModel.FindingHardness.HARD &&
+                it.adjustedSeverity.score >= AppSecurityScanner.RiskLevel.MEDIUM.score
+            } >= 3
+        )
+    }
+
+    // ════════════════════════════════════════════════════════════
+    //  25. Invariant: PLATFORM_SIGNED + com.google.* + PLAY_SIGNED entry
+    //      → certCheck MUST return UNKNOWN, never MISMATCH
+    //      (TrustEvidenceEngine domain-awareness proof)
+    // ════════════════════════════════════════════════════════════
+
+    @Test
+    fun `invariant - PLATFORM_SIGNED Google packages skip PLAY_SIGNED dev entries`() {
+        // This proves the cert check cannot produce MISMATCH for system Google packages.
+        val googleSystemPackages = listOf(
+            "com.google.android.ext.services",
+            "com.google.android.networkstack.tethering",
+            "com.google.android.permissioncontroller",
+            "com.google.android.gsf",
+            "com.google.android.gms.supervision",
+            "com.google.android.tts",
+            "com.google.android.nfc",
+            "com.google.android.bluetooth"
+        )
+
+        for (pkg in googleSystemPackages) {
+            val match = TrustedAppsWhitelist.matchDeveloperCert(
+                packageName = pkg,
+                certPrefix = "FAKE_PLATFORM_KEY_NOT_PLAY_SIGNED_XXXXXX",
+                callerDomain = TrustedAppsWhitelist.TrustDomain.PLATFORM_SIGNED
+            )
+            assertNull(
+                "matchDeveloperCert for PLATFORM_SIGNED $pkg must return null (skip PLAY entry), but got $match",
+                match
+            )
+        }
+    }
+
+    @Test
+    fun `invariant - all HARD FindingTypes actually produce CRITICAL for system apps`() {
+        // Exhaustive: every HARD finding type must produce CRITICAL for system apps
+        val hardTypes = TrustRiskModel.FindingType.entries
+            .filter { it.hardness == TrustRiskModel.FindingHardness.HARD }
+
+        for (ft in hardTypes) {
+            val verdict = model.evaluate(
+                packageName = "com.android.test.${ft.name.lowercase()}",
+                trustEvidence = systemTrust("com.android.test.${ft.name.lowercase()}"),
+                rawFindings = listOf(finding(ft, AppSecurityScanner.RiskLevel.HIGH)),
+                isSystemApp = true,
+                installClass = TrustRiskModel.InstallClass.SYSTEM_PREINSTALLED
+            )
+            assertEquals(
+                "HARD FindingType ${ft.name} must produce CRITICAL for system app",
+                TrustRiskModel.EffectiveRisk.CRITICAL,
+                verdict.effectiveRisk
+            )
+        }
+    }
 }

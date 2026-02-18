@@ -701,11 +701,21 @@ private fun AppReportCard(
                 
                 // Trust & Verdict info
                 Spacer(Modifier.height(8.dp))
-                val verdictLabel = when (report.verdict.effectiveRisk) {
-                    TrustRiskModel.EffectiveRisk.CRITICAL -> "🔴 Vyžaduje pozornost"
-                    TrustRiskModel.EffectiveRisk.NEEDS_ATTENTION -> "🟠 Ke kontrole"
-                    TrustRiskModel.EffectiveRisk.INFO -> "� Informace"
-                    TrustRiskModel.EffectiveRisk.SAFE -> "🟢 Bezpečná"
+                val verdictLabel = if (report.app.isSystemApp) {
+                    // System-specific 3-tier scale: Zkontrolováno / Doporučení / Anomálie integrity
+                    when (report.verdict.effectiveRisk) {
+                        TrustRiskModel.EffectiveRisk.CRITICAL -> "🔴 Anomálie integrity"
+                        TrustRiskModel.EffectiveRisk.NEEDS_ATTENTION -> "🟡 Doporučení"
+                        TrustRiskModel.EffectiveRisk.INFO -> "ℹ️ Doporučení"
+                        TrustRiskModel.EffectiveRisk.SAFE -> "✅ Zkontrolováno"
+                    }
+                } else {
+                    when (report.verdict.effectiveRisk) {
+                        TrustRiskModel.EffectiveRisk.CRITICAL -> "🔴 Vyžaduje pozornost"
+                        TrustRiskModel.EffectiveRisk.NEEDS_ATTENTION -> "🟠 Ke kontrole"
+                        TrustRiskModel.EffectiveRisk.INFO -> "ℹ️ Informace"
+                        TrustRiskModel.EffectiveRisk.SAFE -> "🟢 Bezpečná"
+                    }
                 }
                 val trustLabel = when {
                     trustLevel == TrustEvidenceEngine.TrustLevel.ANOMALOUS && report.app.isSystemApp ->
@@ -776,10 +786,10 @@ private fun SystemAppsSectionHeader(
     }
 
     val summaryParts = mutableListOf<String>()
-    if (critical > 0) summaryParts.add("🔴 $critical kritických")
-    if (needsAttention > 0) summaryParts.add("🟠 $needsAttention ke kontrole")
-    if (info > 0) summaryParts.add("ℹ️ $info info")
-    summaryParts.add("🟢 $safe bezpečných")
+    if (critical > 0) summaryParts.add("🔴 $critical anomálií")
+    if (needsAttention > 0) summaryParts.add("� $needsAttention doporučení")
+    if (info > 0) summaryParts.add("ℹ️ $info doporučení")
+    summaryParts.add("✅ $safe zkontrolováno")
     val summaryText = summaryParts.joinToString("  ·  ")
 
     Card(
